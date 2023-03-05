@@ -18,10 +18,16 @@ menu "Application Configuration"
 		help
 			Set the Maximum retry to avoid station reconnecting to the AP unlimited when the AP is really inexistent.
 
-	config ESP_LOCATION
-		string "Desired location"
-		default "tokyo"
+	config ESP_TARIFF_ELEC
+		string "Tariff code Elec"
+		default "E-1R-SILVER-FLEX-22-11-25-E"
 		help
-			Set your desired location like newyork, london, california
+			Set your tariff code
+
+	config ESP_TARIFF_GAS
+		string "Tariff code Gas"
+		default "G-1R-SILVER-FLEX-22-11-25-E"
+		help
+			Set your tariff code
 
 endmenu

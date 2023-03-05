@@ -1,6 +1,25 @@
-/* The example of ESP-IDF
+/* Octopus Tracker Tariff Display for ESP32 / ESP-IDF
  *
- * This sample code is in the public domain.
+ * Copyright (c) 2023 Nick Schollar
+ * Licenced under MIT Licence
+ *
+ * Displays today's gas and electricity price for the tariff code specified in menuconfig
+ * on two 3-digit common anode 7-segment displays. The tariff code is specific to your region.
+ *
+ * This program fetches the data from the server using a public API once per hour.
+ * A certificate file is needed to connect to the server because HTTPS is mandatory.
+ *
+ * Wi-Fi SSID and password are specified in menuconfig.
+ *
+ * Self-diagnostics:
+ * No dashes or decimal points: Program not running or displays connected incorrectly
+ *   Check display wiring.
+ * No dashes (only decimal points): Not connected to wifi
+ *   Check SSID and password.
+ * One dash on the display: Connected to wifi, time not synchronised yet
+ *   Time is taken from HTTP response header, so this suggests unable to connect to internet.
+ * Two dashes on the display: Time synchronised, prices not obtained yet
+ *   API may have changed. Try tariff URL in a browser.
  */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -11,6 +30,10 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "time.h"
+#include "driver/gpio.h"
+#include "driver/timer.h"
+#include "driver/adc.h"
 
 #include "lwip/err.h"
 #include "lwip/sys.h"
@@ -18,6 +41,55 @@
 #include "esp_http_client.h" 
 #include "esp_tls.h" 
 #include "cJSON.h"
+
+#define pin_segA 5
+#define pin_segB 2
+#define pin_segC 18
+#define pin_segD 22
+#define pin_segE 21
+#define pin_segF 4
+#define pin_segG 19
+#define pin_segDP 23
+#define pin_com1 32
+#define pin_com2 33
+#define pin_com3 25
+#define pin_com4 26
+#define pin_com5 27
+#define pin_com6 14
+
+#define TIMER_DIVIDER         (16)  //  Hardware timer clock divider
+#define TIMER_SCALE           ((TIMER_BASE_CLK / 10000)/ TIMER_DIVIDER)  // convert counter value to seconds
+
+typedef struct {
+    int timer_group;
+    int timer_idx;
+    int alarm_interval;
+    bool auto_reload;
+} timer_info_t;
+
+// Set to True if the time was updated successfully
+bool timeSet = false;
+bool wifi_connected = false;
+// Need to change this to separate ones for gas and elec
+bool got_gas_unit_rate = false;
+bool got_elec_unit_rate = false;
+
+double gas_unit_rate = 0.0;
+double elec_unit_rate = 0.0;
+
+#define NUMBER_OF_BRIGHTNESS_SETTINGS 4
+#define BRIGHTNESS_HYSTERESIS 100
+// brightness of the display (0 to 3)
+uint8_t display_brightness = 3;
+
+#define ADC_FILTER_LENGTH 10
+#define ADC_MAX_VALUE 4095
+#define ADC_HYSTERESIS 200
+static const adc_channel_t channel = ADC_CHANNEL_6;     //GPIO34 for ADC1
+static const adc_bits_width_t width = ADC_WIDTH_BIT_12;
+static const adc_atten_t atten = ADC_ATTEN_DB_11;
+//static const adc_unit_t unit = ADC_UNIT_1;
+
 
 /* FreeRTOS event group to signal when we are connected*/
 static EventGroupHandle_t s_wifi_event_group;
@@ -32,22 +104,25 @@ static const char *TAG = "JSON";
 
 static int s_retry_num = 0;
 
-/* Root cert for metaweather.com, taken from metaweather_com_root_cert.pem
+/* Root cert for octopus.energy.com, taken from octopus_energy_root_cert.pem
 
 	 The PEM file was extracted from the output of this command:
-	 openssl s_client -showcerts -connect www.metaweather.com:443 </dev/null
+	 openssl s_client -showcerts -connect octopus.energy:443 </dev/null >hoge
 
 	 The CA root cert is the last cert given in the chain of certs.
 
 	 To embed it in the app binary, the PEM file is named
 	 in the component.mk COMPONENT_EMBED_TXTFILES variable.
 */
-extern const char metaweather_com_root_cert_pem_start[] asm("_binary_metaweather_com_root_cert_pem_start");
-extern const char metaweather_com_root_cert_pem_end[]	asm("_binary_metaweather_com_root_cert_pem_end");
+extern const char octopus_energy_root_cert_pem_start[] asm("_binary_octopus_energy_root_cert_pem_start");
+//extern const char octopus_energy_root_cert_pem_end[]	asm("_binary_octopus_energy_root_cert_pem_end");
 
 
 esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 {
+    struct tm time_struct;
+    struct timeval timeval_struct;
+    
 	static char *output_buffer;  // Buffer to store response of http request from event handler
 	static int output_len;		 // Stores number of bytes read
 	switch(evt->event_id) {
@@ -62,6 +137,21 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 			break;
 		case HTTP_EVENT_ON_HEADER:
 			ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+            if (strcmp(evt->header_key, "Date") == 0)
+            {
+                ESP_LOGI(TAG, "Date header found: %s", evt->header_value);
+                strptime(evt->header_value, "%a, %d %b %Y %H:%M:%S %Z", &time_struct);
+                ESP_LOGI(TAG, "Time struct written: %d-%d-%d %d:%d:%d", time_struct.tm_year, time_struct.tm_mon, time_struct.tm_mday, time_struct.tm_hour, time_struct.tm_min, time_struct.tm_sec);
+                timeval_struct.tv_sec = mktime(&time_struct);
+                timeval_struct.tv_usec = 0;
+                // tv_sec becomes -1 if mktime failed to convert the time struct into a time value
+                if (timeval_struct.tv_sec > 0)
+                {
+                    timeSet = true;
+                    ESP_LOGI(TAG, "RTC Seconds Since Epoch: %ld", timeval_struct.tv_sec);
+                    ESP_LOGI(TAG, "RTC set, returned: %d", settimeofday(&timeval_struct, NULL));
+                }
+            }
 			break;
 		case HTTP_EVENT_ON_DATA:
 			ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
@@ -130,11 +220,13 @@ static void event_handler(void* arg, esp_event_base_t event_base,
 				xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
 		}
 		ESP_LOGI(TAG,"connect to the AP fail");
+        wifi_connected = false;
 	} else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
 		ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
 		ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
 		s_retry_num = 0;
 		xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        wifi_connected = true;
 	}
 }
 
@@ -270,7 +362,7 @@ size_t http_client_content_length(char * url)
 		.url = url,
 		.event_handler = _http_event_handler,
 		//.user_data = local_response_buffer,			 // Pass address of local buffer to get response
-		.cert_pem = metaweather_com_root_cert_pem_start,
+		.cert_pem = octopus_energy_root_cert_pem_start,
 	};
 	esp_http_client_handle_t client = esp_http_client_init(&config);
 
@@ -302,9 +394,12 @@ esp_err_t http_client_content_get(char * url, char * response_buffer)
 		.url = url,
 		.event_handler = _http_event_handler,
 		.user_data = response_buffer,			 // Pass address of local buffer to get response
-		.cert_pem = metaweather_com_root_cert_pem_start,
+		.cert_pem = octopus_energy_root_cert_pem_start,
 	};
 	esp_http_client_handle_t client = esp_http_client_init(&config);
+    
+    // err = esp_http_client_fetch_headers(client);
+    //ESP_LOGI(TAG, "HTTP Client Fetch Headers returned %d", err);
 
 	// GET
 	esp_err_t err = esp_http_client_perform(client);
@@ -320,12 +415,49 @@ esp_err_t http_client_content_get(char * url, char * response_buffer)
 	} else {
 		ESP_LOGW(TAG, "HTTP GET request failed: %s", esp_err_to_name(err));
 	}
+    
+    
 	esp_http_client_cleanup(client);
 	return err;
 }
 
-void http_client(char * url)
+// Parse the JSON structure and return the unit rate for the specified date
+double parse_object(cJSON *root, char * date)
 {
+    double price = 0.0;
+  cJSON* name = NULL;
+  cJSON* unit_rate = NULL;
+
+  int i;
+
+  cJSON *item = cJSON_GetObjectItem(root,"periods");
+  if (item == NULL)
+  {
+      ESP_LOGE(TAG, "item pointer is NULL");
+  }
+  else
+  {
+	  ESP_LOGI(TAG, "Array size: %d", cJSON_GetArraySize(item));
+      for (i = 0 ; i < cJSON_GetArraySize(item) ; i++)
+      {
+         cJSON * subitem = cJSON_GetArrayItem(item, i);
+         name = cJSON_GetObjectItem(subitem, "date");
+         unit_rate = cJSON_GetObjectItem(subitem, "unit_rate");
+         ESP_LOGI(TAG, "date: %s unit rate: %f", name->valuestring, unit_rate->valuedouble);
+         
+         // Check if the current array entry matches the specified date
+         if (strcmp(name->valuestring, date) == 0)
+         {
+             price = unit_rate->valuedouble;
+         }
+      }
+  }
+  return price;
+}
+
+double http_client(char * url, bool * got_unit_rate)
+{
+    double unit_rate = 0.0;
 	// Get content length from event handler
 	size_t content_length;
 	while (1) {
@@ -345,6 +477,7 @@ void http_client(char * url)
 		}
 	}
 	bzero(response_buffer, content_length+1);
+    ESP_LOGD(TAG, "Memory allocated");
 
 	// Get content from event handler
 	while(1) {
@@ -355,15 +488,578 @@ void http_client(char * url)
 	ESP_LOGD(TAG, "content_length=%d", content_length);
 	ESP_LOGD(TAG, "\n[%s]", response_buffer);
 
-	// Deserialize JSON
-	ESP_LOGI(TAG, "Deserialize.....");
-	cJSON *root = cJSON_Parse(response_buffer);
-	JSON_Analyze(root);
-	cJSON_Delete(root);
-	free(response_buffer);
+    if (!timeSet)
+    {
+        ESP_LOGE(TAG, "Time was not set, so it will not be possible to get price for today");
+    }
+    else
+    {
+        time_t time_now;
+        char time_string[11];
+        time_now = time(NULL);
+        strftime(time_string, (sizeof(time_string) / sizeof(char)), "%Y-%m-%d", gmtime(&time_now));
+        ESP_LOGI(TAG, "Date string: %s", time_string);
+    
+        // Deserialize JSON
+        ESP_LOGI(TAG, "Deserialize.....");
+        cJSON *root = cJSON_Parse(response_buffer);
+        
+        
+        ESP_LOGI(TAG, "Attempt parse.....");
+        unit_rate = parse_object(root, time_string);
+        ESP_LOGI(TAG, "price returned: %f", unit_rate);
+        // Check for null pointer then set
+        if (got_unit_rate)
+            *got_unit_rate = true;
+        
+        cJSON_Delete(root);
+        free(response_buffer);
+    }
+    return unit_rate;
+}
+
+// Task for testing the display task - disable get_unit_rates_task and enable this one to test extreme values
+void test_task(void * pvParameters)
+{
+    ESP_LOGI(TAG, "Test task started");
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    ESP_LOGI(TAG, "Test task: Wifi connected");
+    wifi_connected = true;
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    ESP_LOGI(TAG, "Test task: Time set");
+    timeSet = true;
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    gas_unit_rate = 2.73;
+    got_gas_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Gas unit rate set %f", gas_unit_rate);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    elec_unit_rate = 16.5;
+    got_elec_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    ESP_LOGI(TAG, "Test task: Unit rates unset");
+    got_gas_unit_rate = true;
+    got_elec_unit_rate = true;
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    gas_unit_rate = 0.0;
+    got_gas_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Gas unit rate set %f", gas_unit_rate);
+    
+    elec_unit_rate = -10000.1;
+    got_elec_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    gas_unit_rate = 0.1;
+    got_gas_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Gas unit rate set %f", gas_unit_rate);
+    
+    elec_unit_rate = -10000.0;
+    got_elec_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    gas_unit_rate = 9.9;
+    got_gas_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Gas unit rate set %f", gas_unit_rate);
+    
+    elec_unit_rate = -9999.9;
+    got_elec_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    gas_unit_rate = 10.0;
+    got_gas_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Gas unit rate set %f", gas_unit_rate);
+    
+    elec_unit_rate = -1000.1;
+    got_elec_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    gas_unit_rate = 10.1;
+    got_gas_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Gas unit rate set %f", gas_unit_rate);
+    
+    elec_unit_rate = -1000.0;
+    got_elec_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    gas_unit_rate = 99.9;
+    got_gas_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Gas unit rate set %f", gas_unit_rate);
+    
+    elec_unit_rate = -999.9;
+    got_elec_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    gas_unit_rate = 100.0;
+    got_gas_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Gas unit rate set %f", gas_unit_rate);
+    
+    elec_unit_rate = -100.1;
+    got_elec_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    gas_unit_rate = 100.1;
+    got_gas_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Gas unit rate set %f", gas_unit_rate);
+    
+    elec_unit_rate = -100.0;
+    got_elec_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    gas_unit_rate = 999.9;
+    got_gas_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Gas unit rate set %f", gas_unit_rate);
+    
+    elec_unit_rate = -99.9;
+    got_elec_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    gas_unit_rate = 1000.0;
+    got_gas_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Gas unit rate set %f", gas_unit_rate);
+    
+    elec_unit_rate = -10.1;
+    got_elec_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    gas_unit_rate = 1000.1;
+    got_gas_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Gas unit rate set %f", gas_unit_rate);
+    
+    elec_unit_rate = -10;
+    got_elec_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    gas_unit_rate = 9999.9;
+    got_gas_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Gas unit rate set %f", gas_unit_rate);
+    
+    elec_unit_rate = -9.9;
+    got_elec_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+    
+    gas_unit_rate = 10000.0;
+    got_gas_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Gas unit rate set %f", gas_unit_rate);
+    
+    elec_unit_rate = -0.1;
+    got_elec_unit_rate = true;
+    ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
+    vTaskDelay(2000 / portTICK_RATE_MS);
+}
+
+// Task for connecting to wifi and getting unit rates
+void get_unit_rates_task(void * pvParameters)
+{
+    ESP_LOGI(TAG, "starting get_unit_rates on core %d", xPortGetCoreID());
+    time_t time_now;
+    uint8_t hour_last;
+    struct tm time_struct;
+    
+    while(1)
+    {
+        // Start wifi connection if not already connected
+        if (!wifi_connected)
+        {
+            ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
+            wifi_init_sta();
+        }
+
+        // Get tariff information
+        // Print tariff names in debug console
+        ESP_LOGI(TAG, "Elec tariff=%s",CONFIG_ESP_TARIFF_ELEC);
+        ESP_LOGI(TAG, "Gas tariff=%s",CONFIG_ESP_TARIFF_GAS);
+        // Generate url for elec tariff api
+        char url[128];
+        sprintf(url, "https://octopus.energy/api/v1/tracker/%s/daily/current/1/1/", CONFIG_ESP_TARIFF_ELEC);
+        ESP_LOGI(TAG, "url=%s",url);
+        // Do HTTP request and parse
+        elec_unit_rate = http_client(url, &got_elec_unit_rate); 
+        // Generate url for gas tariff api
+        sprintf(url, "https://octopus.energy/api/v1/tracker/%s/daily/current/1/1/", CONFIG_ESP_TARIFF_GAS);
+        ESP_LOGI(TAG, "url=%s",url);
+        // Do HTTP request and parse
+        gas_unit_rate = http_client(url, &got_gas_unit_rate); 
+        ESP_LOGI(TAG, "Reached the end");
+        // Get time (comment out first line for testing to make it detect a change in time every time)
+        time_now = time(NULL);
+        gmtime_r(&time_now, &time_struct);
+        hour_last = time_struct.tm_hour;
+        ESP_LOGI(TAG, "hour_last set to %d", hour_last);
+    
+        while(1)
+        {
+            vTaskDelay(10000 / portTICK_RATE_MS);
+            // Check for change in current hour and repeat http_client in that case
+            // Check every hour even though rates should only change once a day because
+            // sometimes the day's rates are not available until several hours into the day.
+            time_now = time(NULL);
+            gmtime_r(&time_now, &time_struct);
+            if (time_struct.tm_hour != hour_last)
+            {
+                got_gas_unit_rate = false;
+                got_elec_unit_rate = false;
+                ESP_LOGI(TAG, "time_struct.tm_hour %d differs from hour_last %d", time_struct.tm_hour, hour_last);
+                break;
+            }
+        }
+    }
+}
+
+// Callback for Timer Interrupt - displays the next digit on the 7-segment display on each run
+static bool IRAM_ATTR timer_group_isr_callback(void *args)
+{
+    int32_t unit_rate_int;
+    
+    uint8_t display_digits[6] = {1,2,3,4,5,6};
+    static uint8_t decimal_points = 0b111111;
+    uint8_t segment_patterns[12] = {0b00111111, 0b00000110, 0b01011011, 0b01001111, 0b01100110, 0b01101101, 0b01111100, 0b00000111, 0b01111111, 0b01100111, 0b00000000, 0b01000000};
+    const uint8_t pin_com[6] = {pin_com1, pin_com2, pin_com3, pin_com4, pin_com5, pin_com6};
+    uint8_t display_segments[6];
+    static uint8_t current_disp_index;
+    static uint8_t dim_cycle_counter = 0;
+    
+    // If first digit is about to be displayed, update display data
+    if ((current_disp_index == 0) && (dim_cycle_counter == 0))
+    {
+        if (timeSet && wifi_connected && got_gas_unit_rate)
+        {
+            // Generate numeric digits
+            // Gas
+            unit_rate_int = (int32_t)(gas_unit_rate * 100.0);
+            if (unit_rate_int >= 100000)        // >= 1000.00 out of range
+            {
+                display_digits[0] = 0x0A;
+                display_digits[1] = 1;
+                display_digits[2] = 0x0A;
+                decimal_points &= 0b111000;
+                decimal_points |= 0b000100;     // Decimal point in 3rd position
+            }
+            else if (unit_rate_int >= 10000)         // 100.00 - 999.99
+            {
+                display_digits[0] = unit_rate_int / 10000ul % 10;
+                display_digits[1] = unit_rate_int / 1000ul % 10;
+                display_digits[2] = unit_rate_int / 100ul % 10;
+                decimal_points &= 0b111000;
+                decimal_points |= 0b000100;     // Decimal point in 3rd position
+            }
+            else if (unit_rate_int >= 1000)     // 10.00 - 99.99
+            {
+                display_digits[0] = unit_rate_int / 1000ul % 10;
+                display_digits[1] = unit_rate_int / 100ul % 10;
+                display_digits[2] = unit_rate_int / 10ul % 10;
+                decimal_points &= 0b111000;
+                decimal_points |= 0b000010;     // Decimal point in 2nd position
+            }
+            else if (unit_rate_int >= 0)        // 0.00 - 9.99
+            {
+                display_digits[0] = unit_rate_int / 100ul % 10;
+                display_digits[1] = unit_rate_int / 10ul % 10;
+                display_digits[2] = unit_rate_int % 10;
+                decimal_points &= 0b111000;
+                decimal_points |= 0b000001;     // Decimal point in 1st position
+            }
+            else if (unit_rate_int > -1000)     // -9.90 to -0.10
+            {
+                display_digits[0] = 0x0B;
+                display_digits[1] = (unit_rate_int * -1) / 100ul % 10;
+                display_digits[2] = (unit_rate_int * -1) / 10ul % 10;
+                decimal_points &= 0b111000;
+                decimal_points |= 0b000010;     // Decimal point in 2nd position
+            }
+            else if (unit_rate_int > -10000)    // -99.9 to -10
+            {
+                display_digits[0] = 0x0B;
+                display_digits[1] = (unit_rate_int * -1) / 1000ul % 10;
+                display_digits[2] = (unit_rate_int * -1) / 100ul % 10;
+                decimal_points &= 0b111000;
+                decimal_points |= 0b000100;     // Decimal point in 3rd position
+            }
+            else                                // Out of range (negative)
+            {
+                display_digits[0] = 0x0B;
+                display_digits[1] = 1;
+                display_digits[2] = 0x0A;
+                decimal_points &= 0b111000;
+                decimal_points |= 0b000000;     // Decimal point in 3rd position
+            }
+        }
+        else
+        {
+            // generate dashes pattern
+            display_digits[0] = wifi_connected ? 0xB : 0xA;
+            display_digits[1] = timeSet ? 0xB : 0xA;
+            display_digits[2] = got_gas_unit_rate ? 0xB : 0xA;
+        }
+        
+        if (timeSet && wifi_connected && got_elec_unit_rate)
+        {
+            // Electricity
+            unit_rate_int = (int32_t)(elec_unit_rate * 100.0);
+            if (unit_rate_int >= 100000)        // >= 1000.00
+            {
+                display_digits[3] = 1;
+                display_digits[4] = 0x0A;
+                display_digits[5] = 0x0A;
+                decimal_points &= 0b000111;
+                decimal_points |= 0b100000;     // Decimal point in 3rd position
+            }
+            else if (unit_rate_int >= 10000)         // 100.00 - 999.99
+            {
+                display_digits[3] = unit_rate_int / 10000ul % 10;
+                display_digits[4] = unit_rate_int / 1000ul % 10;
+                display_digits[5] = unit_rate_int / 100ul % 10;
+                decimal_points &= 0b000111;
+                decimal_points |= 0b100000;     // Decimal point in 3rd position
+            }
+            else if (unit_rate_int >= 1000)     // 10.00 - 99.99
+            {
+                display_digits[3] = unit_rate_int / 1000ul % 10;
+                display_digits[4] = unit_rate_int / 100ul % 10;
+                display_digits[5] = unit_rate_int / 10ul % 10;
+                decimal_points &= 0b000111;
+                decimal_points |= 0b010000;     // Decimal point in 2nd position
+            }
+            else if (unit_rate_int >= 0)        // 1.00 - 9.99
+            {
+                display_digits[3] = unit_rate_int / 100ul % 10;
+                display_digits[4] = unit_rate_int / 10ul % 10;
+                display_digits[5] = unit_rate_int % 10;
+                decimal_points &= 0b000111;
+                decimal_points |= 0b001000;     // Decimal point in 1st position
+            }
+            else if (unit_rate_int > -1000)     // -9.9 to -0.1
+            {
+                display_digits[3] = 0x0B;
+                display_digits[4] = (unit_rate_int * -1) / 100ul % 10;
+                display_digits[5] = (unit_rate_int * -1) / 10ul % 10;
+                decimal_points &= 0b000111;
+                decimal_points |= 0b010000;     // Decimal point in 2nd position
+            }
+            else if (unit_rate_int > -10000)    // -99.9 to -10
+            {
+                display_digits[3] = 0x0B;
+                display_digits[4] = (unit_rate_int * -1) / 1000ul % 10;
+                display_digits[5] = (unit_rate_int * -1) / 100ul % 10;
+                decimal_points &= 0b000111;
+                decimal_points |= 0b100000;     // Decimal point in 3rd position
+            }
+            else                                // Out of range (negative)
+            {
+                display_digits[3] = 0x0B;
+                display_digits[4] = 1;
+                display_digits[5] = 0x0A;
+                decimal_points &= 0b000111;
+                decimal_points |= 0b000000;     // Decimal point in 3rd position
+            }
+        }
+        else
+        {
+            // generate dashes pattern
+            display_digits[3] = wifi_connected ? 0xB : 0xA;
+            display_digits[4] = timeSet ? 0xB : 0xA;
+            display_digits[5] = got_elec_unit_rate ? 0xB : 0xA;
+        }
+        
+        // Get required segment patterns
+        for (uint8_t i = 0; i < 6; i++)
+        {
+            display_segments[i] = segment_patterns[display_digits[i]];
+        }
+    }
+    
+    // Turn off all digits
+    gpio_set_level(pin_com1, 1);
+    gpio_set_level(pin_com2, 1);
+    gpio_set_level(pin_com3, 1);
+    gpio_set_level(pin_com4, 1);
+    gpio_set_level(pin_com5, 1);
+    gpio_set_level(pin_com6, 1);
+    
+    // Turn off all segments by setting specified bits high in 'Write 1 to set' register
+    REG_WRITE(GPIO_OUT_W1TS_REG, ((uint32_t)1 << pin_segA)
+                       | ((uint32_t)1 << pin_segB)
+                       | ((uint32_t)1 << pin_segC)
+                       | ((uint32_t)1 << pin_segD)
+                       | ((uint32_t)1 << pin_segE)
+                       | ((uint32_t)1 << pin_segF)
+                       | ((uint32_t)1 << pin_segG)
+                       | ((uint32_t)1 << pin_segDP));
+    
+    if (dim_cycle_counter >= (NUMBER_OF_BRIGHTNESS_SETTINGS - 1 - display_brightness))
+    {
+        // Turn on required segments
+        REG_WRITE(GPIO_OUT_W1TC_REG,
+                             ((((display_segments[current_disp_index] & 0x01) >> 0)) << pin_segA )
+                           | ((((display_segments[current_disp_index] & 0x02) >> 1)) << pin_segB )
+                           | ((((display_segments[current_disp_index] & 0x04) >> 2)) << pin_segC )
+                           | ((((display_segments[current_disp_index] & 0x08) >> 3)) << pin_segD )
+                           | ((((display_segments[current_disp_index] & 0x10) >> 4)) << pin_segE )
+                           | ((((display_segments[current_disp_index] & 0x20) >> 5)) << pin_segF )
+                           | ((((display_segments[current_disp_index] & 0x40) >> 6)) << pin_segG )
+                           | ((((decimal_points >> current_disp_index & 0x01) >> 0)) << pin_segDP)
+                           );
+                           
+        // Turn on required digit
+        //REG_WRITE(GPIO_OUT_W1TC_REG, (uint32_t)1 << pin_com[current_disp_index]);
+        gpio_set_level(pin_com[current_disp_index], 0);
+    }
+    
+    // There are NUMBER_OF_BRIGHTNESS_SETTINGS iterations of dim_cycle_counter where the display is turned off or on
+    // according to the value of display_brightness to change the brightness of the digit. After all iterations,
+    // current_disp_index (the digit counter) is incremented. 
+    if (dim_cycle_counter < (NUMBER_OF_BRIGHTNESS_SETTINGS - 1))
+    {
+        dim_cycle_counter++;
+    }
+    else
+    {
+        dim_cycle_counter = 0;
+        if (current_disp_index < 5)
+        {
+            current_disp_index++;
+        }
+        else
+        {
+            current_disp_index = 0;
+        }
+    }
+    
+    
+    
+    return true; // return whether we need to yield at the end of ISR
 }
 
 
+/**
+ * @brief Initialize selected timer of timer group
+ *
+ * @param group Timer Group number, index from 0
+ * @param timer timer ID, index from 0
+ * @param auto_reload whether auto-reload on alarm event
+ * @param timer_interval_tenthmsec interval of alarm
+ */
+static void example_timer_init(int group, int timer, bool auto_reload, int timer_interval_tenthmsec)
+{
+    /* Select and initialize basic parameters of the timer */
+    timer_config_t config = {
+        .divider = TIMER_DIVIDER,
+        .counter_dir = TIMER_COUNT_UP,
+        .counter_en = TIMER_PAUSE,
+        .alarm_en = TIMER_ALARM_EN,
+        .auto_reload = auto_reload,
+    }; // default clock source is APB
+    timer_init(group, timer, &config);
+
+    /* Timer's counter will initially start from value below.
+       Also, if auto_reload is set, this value will be automatically reload on alarm */
+    timer_set_counter_value(group, timer, 0);
+
+    /* Configure the alarm value and the interrupt on alarm. */
+    timer_set_alarm_value(group, timer, timer_interval_tenthmsec * TIMER_SCALE);
+    timer_enable_intr(group, timer);
+
+    timer_info_t *timer_info = calloc(1, sizeof(timer_info_t));
+    timer_info->timer_group = group;
+    timer_info->timer_idx = timer;
+    timer_info->auto_reload = auto_reload;
+    timer_info->alarm_interval = timer_interval_tenthmsec;
+    timer_isr_callback_add(group, timer, timer_group_isr_callback, timer_info, 0);
+
+    timer_start(group, timer);
+}
+
+// Display task - sets up the Timer Interrupt on whichever core display_task is pinned to
+// Timer interrupt used for updating the display to allow for faster refresh rate
+void display_task(void * pvParameters)
+{
+    ESP_LOGI(TAG, "starting display_task on core %d", xPortGetCoreID());
+    
+    // Configure timer in this task to guarantee that correct core is used for ISR
+    example_timer_init(TIMER_GROUP_0, TIMER_0, true, 2);
+    
+    while(1)
+    {
+        vTaskDelay(10000 / portTICK_RATE_MS);
+    }
+}
+
+/* Read brightness sensor and update LED brightness
+ * The photodiode is connected between the ADC input pin (K) and GND (A)
+ * A 10k resistor is connected between the input pin and +3V3
+ */
+void get_light_level_task(void * pvParameters)
+{
+    adc1_config_width(width);
+    adc1_config_channel_atten(channel, atten);
+    uint16_t adc_filter[ADC_FILTER_LENGTH];
+    uint16_t adc_average = 0;
+    uint16_t adc_reading;
+    
+    while(1)
+    {
+        // 100ms sampling interval
+        vTaskDelay(100 / portTICK_RATE_MS);
+        
+        // Move entries in the filter along
+        for (uint8_t i = 0; i < ADC_FILTER_LENGTH - 1; i++)
+        {
+            adc_filter[i] = adc_filter[i+1];
+        }
+        // Get ADC reading and add to filter (invert so that higher value means brighter)
+        // Multiply by 2
+        adc_reading = (adc1_get_raw((adc1_channel_t)channel) << 2);
+        // Expand the upper half of the range and discard the lower half
+        if (adc_reading > ((ADC_MAX_VALUE + 1) * 3))
+        {
+            adc_reading -= ((ADC_MAX_VALUE + 1) * 3);
+        }
+        else
+        {
+            adc_reading = 0;
+        }
+        // Add to filter
+        adc_filter[ADC_FILTER_LENGTH - 1] = ADC_MAX_VALUE - adc_reading;
+        
+        // Calculate average from the filter
+        adc_average = 0;
+        for (uint8_t i = 0; i < ADC_FILTER_LENGTH; i++)
+        {
+            adc_average += adc_filter[i];
+        }
+        adc_average /= ADC_FILTER_LENGTH;
+        
+        // Calculate LED brightness with hysteresis
+        int adc_range_per_level = ADC_MAX_VALUE / NUMBER_OF_BRIGHTNESS_SETTINGS;
+        int upper_limit = display_brightness * adc_range_per_level + adc_range_per_level + BRIGHTNESS_HYSTERESIS;
+        int lower_limit = display_brightness * adc_range_per_level - BRIGHTNESS_HYSTERESIS;
+        
+        if (adc_average >= upper_limit) {
+            display_brightness = (display_brightness + 1) % NUMBER_OF_BRIGHTNESS_SETTINGS;
+        } else if (adc_average <= lower_limit) {
+            display_brightness = (display_brightness + NUMBER_OF_BRIGHTNESS_SETTINGS - 1) % NUMBER_OF_BRIGHTNESS_SETTINGS;
+        }
+        
+        //ESP_LOGI(TAG, "ADC value %d Brightness %d", adc_average, display_brightness);
+    }
+}
+
+// Main function - execution starts here
 void app_main()
 {
 	//Initialize NVS
@@ -373,16 +1069,49 @@ void app_main()
 		ret = nvs_flash_init();
 	}
 	ESP_ERROR_CHECK(ret);
+    
+    // Set up GPIO
+    
+    gpio_config_t io_conf;
+    io_conf.intr_type = (gpio_int_type_t)GPIO_PIN_INTR_DISABLE;
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pin_bit_mask = ((uint64_t)1 << pin_segA)
+                         | ((uint64_t)1 << pin_segB)
+                         | ((uint64_t)1 << pin_segC)
+                         | ((uint64_t)1 << pin_segD)
+                         | ((uint64_t)1 << pin_segE)
+                         | ((uint64_t)1 << pin_segF)
+                         | ((uint64_t)1 << pin_segG)
+                         | ((uint64_t)1 << pin_segDP)
+                         | ((uint64_t)1 << pin_com1)
+                         | ((uint64_t)1 << pin_com2)
+                         | ((uint64_t)1 << pin_com3)
+                         | ((uint64_t)1 << pin_com4)
+                         | ((uint64_t)1 << pin_com5)
+                         | ((uint64_t)1 << pin_com6);
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    ret = gpio_config(&io_conf);
+    
+	ESP_ERROR_CHECK(ret);
+    
+    // FreeRTOS task setup
+    
+    TaskHandle_t getUnitRatesHandle;
+    TaskHandle_t displayHandle;
+    TaskHandle_t getLightLevelHandle;
+    
+    xTaskCreatePinnedToCore(get_unit_rates_task, "get_unit_rates_task", 4096, NULL, configMAX_PRIORITIES - 3, &getUnitRatesHandle, 1);
+    
+    // Uncomment this task and comment out display_task below to test display with different values
+    //xTaskCreatePinnedToCore(test_task, "test_task", 4096, NULL, configMAX_PRIORITIES - 3, &getUnitRatesHandle, 1);
+    
+    xTaskCreatePinnedToCore(display_task, "display_task", 4096, NULL, configMAX_PRIORITIES - 2, &displayHandle, 1);
+    
+    xTaskCreatePinnedToCore(get_light_level_task, "get_light_level_task", 4096, NULL, configMAX_PRIORITIES - 4, &getLightLevelHandle, 1);
 
-	ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
-	wifi_init_sta();
-
-	// Get Weather Information from weatherdbi.herokuapp.com
-	ESP_LOGI(TAG, "location=%s",CONFIG_ESP_LOCATION);
-	char url[64];
-	//sprintf(url, "https://weatherdbi.herokuapp.com/data/weather/newyork");
-	//sprintf(url, "https://weatherdbi.herokuapp.com/data/weather/tokyo");
-	sprintf(url, "https://weatherdbi.herokuapp.com/data/weather/%s", CONFIG_ESP_LOCATION);
-	ESP_LOGI(TAG, "url=%s",url);
-	http_client(url); 
+	while(1)
+    {
+        vTaskDelay(1000 / portTICK_RATE_MS);
+    }
 }
