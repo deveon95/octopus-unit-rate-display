@@ -19,14 +19,32 @@ menu "Application Configuration"
 			Set the Maximum retry to avoid station reconnecting to the AP unlimited when the AP is really inexistent.
 
 	config ESP_TARIFF_ELEC
-		string "Tariff code Elec"
+		string "Tariff code Elec Tracker"
 		default "E-1R-SILVER-FLEX-22-11-25-E"
 		help
 			Set your tariff code
 
 	config ESP_TARIFF_GAS
-		string "Tariff code Gas"
+		string "Tariff code Gas Tracker"
 		default "G-1R-SILVER-FLEX-22-11-25-E"
+		help
+			Set your tariff code
+            
+	config ESP_TARIFF_FLEX
+		string "Product name for Flexible tariff"
+		default "VAR-22-11-01"
+		help
+			Set your tariff code
+            
+	config ESP_TARIFF_ELEC_FLEX
+		string "Tariff code Elec Flexible"
+		default "E-1R-VAR-22-11-01-E"
+		help
+			Set your tariff code
+
+	config ESP_TARIFF_GAS_FLEX
+		string "Tariff code Gas Flexible"
+		default "G-1R-VAR-22-11-01-E"
 		help
 			Set your tariff code
 

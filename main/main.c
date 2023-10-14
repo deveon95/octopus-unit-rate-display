@@ -42,20 +42,31 @@
 #include "esp_tls.h" 
 #include "cJSON.h"
 
-#define pin_segA 5
-#define pin_segB 2
-#define pin_segC 18
-#define pin_segD 22
-#define pin_segE 21
-#define pin_segF 4
-#define pin_segG 19
-#define pin_segDP 23
-#define pin_com1 32
-#define pin_com2 33
-#define pin_com3 25
-#define pin_com4 26
-#define pin_com5 27
-#define pin_com6 14
+#define SR_DELAY_US 1
+#define NUM_OF_ANODES 16
+#define ANODES_IN_USE 0b0011111100111111
+
+#define pin_segAR 14
+#define pin_segBR 21
+#define pin_segCR 47
+#define pin_segDR 48
+#define pin_segER 35
+#define pin_segFR 36
+#define pin_segGR 37
+#define pin_segDPR 38
+#define pin_segAL 4
+#define pin_segBL 5
+#define pin_segCL 6
+#define pin_segDL 7
+#define pin_segEL 17
+#define pin_segFL 18
+#define pin_segGL 8
+#define pin_segDPL 13
+
+#define pin_SOE 9
+#define pin_SLAT 10
+#define pin_SDAT 11
+#define pin_SCK 12
 
 #define TIMER_DIVIDER         (16)  //  Hardware timer clock divider
 #define TIMER_SCALE           ((TIMER_BASE_CLK / 10000)/ TIMER_DIVIDER)  // convert counter value to seconds
@@ -67,15 +78,23 @@ typedef struct {
     bool auto_reload;
 } timer_info_t;
 
+//spi_device_handle_t spihandle;
+
 // Set to True if the time was updated successfully
 bool timeSet = false;
 bool wifi_connected = false;
 // Need to change this to separate ones for gas and elec
 bool got_gas_unit_rate = false;
 bool got_elec_unit_rate = false;
+bool got_gas_flex_unit_rate = false;
+bool got_elec_flex_unit_rate = false;
+#define TARIFF_TYPE_TRACKER 0
+#define TARIFF_TYPE_FLEXIBLE 1
 
 double gas_unit_rate = 0.0;
 double elec_unit_rate = 0.0;
+double gas_flex_unit_rate = 0.0;
+double elec_flex_unit_rate = 0.0;
 
 #define NUMBER_OF_BRIGHTNESS_SETTINGS 4
 #define BRIGHTNESS_HYSTERESIS 100
@@ -85,7 +104,7 @@ uint8_t display_brightness = 3;
 #define ADC_FILTER_LENGTH 10
 #define ADC_MAX_VALUE 4095
 #define ADC_HYSTERESIS 200
-static const adc_channel_t channel = ADC_CHANNEL_6;     //GPIO34 for ADC1
+static const adc_channel_t channel = ADC_CHANNEL_0;     //GPIO1 for ADC1
 static const adc_bits_width_t width = ADC_WIDTH_BIT_12;
 static const adc_atten_t atten = ADC_ATTEN_DB_11;
 //static const adc_unit_t unit = ADC_UNIT_1;
@@ -422,40 +441,101 @@ esp_err_t http_client_content_get(char * url, char * response_buffer)
 }
 
 // Parse the JSON structure and return the unit rate for the specified date
-double parse_object(cJSON *root, char * date)
+double parse_object(cJSON *root, char * date, uint8_t tariff_type)
 {
     double price = 0.0;
-  cJSON* name = NULL;
-  cJSON* unit_rate = NULL;
-
-  int i;
-
-  cJSON *item = cJSON_GetObjectItem(root,"periods");
-  if (item == NULL)
-  {
-      ESP_LOGE(TAG, "item pointer is NULL");
-  }
-  else
-  {
-	  ESP_LOGI(TAG, "Array size: %d", cJSON_GetArraySize(item));
-      for (i = 0 ; i < cJSON_GetArraySize(item) ; i++)
-      {
-         cJSON * subitem = cJSON_GetArrayItem(item, i);
-         name = cJSON_GetObjectItem(subitem, "date");
-         unit_rate = cJSON_GetObjectItem(subitem, "unit_rate");
-         ESP_LOGI(TAG, "date: %s unit rate: %f", name->valuestring, unit_rate->valuedouble);
-         
-         // Check if the current array entry matches the specified date
-         if (strcmp(name->valuestring, date) == 0)
-         {
-             price = unit_rate->valuedouble;
-         }
-      }
-  }
-  return price;
+    cJSON* name = NULL;
+    cJSON* unit_rate = NULL;
+    cJSON* payment_method = NULL;
+    cJSON* expiry = NULL;
+    
+    int i;
+    
+    if (tariff_type == TARIFF_TYPE_TRACKER)
+    {
+        cJSON *item = cJSON_GetObjectItem(root,"periods");
+        if (item == NULL)
+        {
+            ESP_LOGE(TAG, "item pointer is NULL");
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Array size: %d", cJSON_GetArraySize(item));
+            for (i = 0 ; i < cJSON_GetArraySize(item) ; i++)
+            {
+                cJSON * subitem = cJSON_GetArrayItem(item, i);
+                name = cJSON_GetObjectItem(subitem, "date");
+                unit_rate = cJSON_GetObjectItem(subitem, "unit_rate");
+                ESP_LOGI(TAG, "date: %s unit rate: %f", name->valuestring, unit_rate->valuedouble);
+                // Check if the current array entry matches the specified date
+                if (strcmp(name->valuestring, date) == 0)
+                {
+                    price = unit_rate->valuedouble;
+                }
+            }
+        }
+    }
+    else if (tariff_type == TARIFF_TYPE_FLEXIBLE)
+    {
+        cJSON *item = cJSON_GetObjectItem(root,"results");
+        if (item == NULL)
+        {
+            ESP_LOGE(TAG, "item pointer is NULL");
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Array size: %d", cJSON_GetArraySize(item));
+            for (i = 0 ; i < cJSON_GetArraySize(item) ; i++)
+            {
+                cJSON * subitem = cJSON_GetArrayItem(item, i);
+                name = cJSON_GetObjectItem(subitem, "valid_from");
+                ESP_LOGI(TAG, "valid_from: %s", name->valuestring);
+                /*
+                if (!cJSON_IsNull(subitem, "valid_to"))
+                {
+                    expiry = cJSON_GetObjectItem(subitem, "valid_to");
+                }
+                else
+                {
+                    expiry = cJSON_CreateNull();
+                }
+                
+                if (expiry == NULL)
+                {
+                    ESP_LOGI(TAG, "valid_to: null");
+                }
+                else
+                {
+                    ESP_LOGI(TAG, "valid_to: %s", expiry->valuestring);
+                }
+                */
+                unit_rate = cJSON_GetObjectItem(subitem, "value_inc_vat");
+                ESP_LOGI(TAG, "unit rate: %f", unit_rate->valuedouble);
+                payment_method = cJSON_GetObjectItem(subitem, "payment_method");
+                ESP_LOGI(TAG, "payment method: %s", payment_method->valuestring);
+                //if (expiry == NULL)
+                //{
+                    ESP_LOGI(TAG, "from: %s unit rate: %f payment method: %s", name->valuestring, unit_rate->valuedouble, payment_method->valuestring);
+                //}
+                //else
+                //{
+                //    ESP_LOGI(TAG, "from: %s to: %s unit rate: %f payment method: %s", name->valuestring, expiry->valuestring, unit_rate->valuedouble, payment_method->valuestring);
+                //}
+                
+                // Check if the current array entry matches the specified date
+                // Just going to assume that the first entry in the list is always the current one
+                if (strcmp(payment_method->valuestring, "DIRECT_DEBIT") == 0)
+                {
+                    price = unit_rate->valuedouble;
+                    break;
+                }
+            }
+        }
+    }
+    return price;
 }
 
-double http_client(char * url, bool * got_unit_rate)
+double http_client(char * url, bool * got_unit_rate, uint8_t tariff_type)
 {
     double unit_rate = 0.0;
 	// Get content length from event handler
@@ -506,7 +586,7 @@ double http_client(char * url, bool * got_unit_rate)
         
         
         ESP_LOGI(TAG, "Attempt parse.....");
-        unit_rate = parse_object(root, time_string);
+        unit_rate = parse_object(root, time_string, tariff_type);
         ESP_LOGI(TAG, "price returned: %f", unit_rate);
         // Check for null pointer then set
         if (got_unit_rate)
@@ -669,6 +749,7 @@ void get_unit_rates_task(void * pvParameters)
     ESP_LOGI(TAG, "starting get_unit_rates on core %d", xPortGetCoreID());
     time_t time_now;
     uint8_t hour_last;
+    uint8_t day_last;
     struct tm time_struct;
     
     while(1)
@@ -680,6 +761,7 @@ void get_unit_rates_task(void * pvParameters)
             wifi_init_sta();
         }
 
+        // Tracker tariff
         // Get tariff information
         // Print tariff names in debug console
         ESP_LOGI(TAG, "Elec tariff=%s",CONFIG_ESP_TARIFF_ELEC);
@@ -689,18 +771,38 @@ void get_unit_rates_task(void * pvParameters)
         sprintf(url, "https://octopus.energy/api/v1/tracker/%s/daily/current/1/1/", CONFIG_ESP_TARIFF_ELEC);
         ESP_LOGI(TAG, "url=%s",url);
         // Do HTTP request and parse
-        elec_unit_rate = http_client(url, &got_elec_unit_rate); 
+        elec_unit_rate = http_client(url, &got_elec_unit_rate, TARIFF_TYPE_TRACKER); 
         // Generate url for gas tariff api
         sprintf(url, "https://octopus.energy/api/v1/tracker/%s/daily/current/1/1/", CONFIG_ESP_TARIFF_GAS);
         ESP_LOGI(TAG, "url=%s",url);
         // Do HTTP request and parse
-        gas_unit_rate = http_client(url, &got_gas_unit_rate); 
+        gas_unit_rate = http_client(url, &got_gas_unit_rate, TARIFF_TYPE_TRACKER);
+        
+        // Flexible tariff
+        // Get tariff information
+        // Print tariff names in debug console
+        ESP_LOGI(TAG, "Elec tariff=%s",CONFIG_ESP_TARIFF_ELEC_FLEX);
+        ESP_LOGI(TAG, "Gas tariff=%s",CONFIG_ESP_TARIFF_GAS_FLEX);
+        // Generate url for elec tariff api
+        sprintf(url, "https://api.octopus.energy/v1/products/%s/electricity-tariffs/%s/standard-unit-rates/", CONFIG_ESP_TARIFF_FLEX, CONFIG_ESP_TARIFF_ELEC_FLEX);
+        ESP_LOGI(TAG, "url=%s",url);
+        // Do HTTP request and parse
+        elec_flex_unit_rate = http_client(url, &got_elec_flex_unit_rate, TARIFF_TYPE_FLEXIBLE); 
+        // Generate url for gas tariff api
+        sprintf(url, "https://api.octopus.energy/v1/products/%s/gas-tariffs/%s/standard-unit-rates/", CONFIG_ESP_TARIFF_FLEX, CONFIG_ESP_TARIFF_GAS_FLEX);
+        ESP_LOGI(TAG, "url=%s",url);
+        // Do HTTP request and parse
+        gas_flex_unit_rate = http_client(url, &got_gas_flex_unit_rate, TARIFF_TYPE_FLEXIBLE);
+        
+        
         ESP_LOGI(TAG, "Reached the end");
         // Get time (comment out first line for testing to make it detect a change in time every time)
         time_now = time(NULL);
         gmtime_r(&time_now, &time_struct);
         hour_last = time_struct.tm_hour;
+        day_last = time_struct.tm_mday;
         ESP_LOGI(TAG, "hour_last set to %d", hour_last);
+        ESP_LOGI(TAG, "day_last set to %d", day_last);
     
         while(1)
         {
@@ -715,24 +817,83 @@ void get_unit_rates_task(void * pvParameters)
                 got_gas_unit_rate = false;
                 got_elec_unit_rate = false;
                 ESP_LOGI(TAG, "time_struct.tm_hour %d differs from hour_last %d", time_struct.tm_hour, hour_last);
+                // Check for change in current day for flexible tariff
+                // This updates much less frequently so no need to refresh it hourly
+                if (time_struct.tm_mday != day_last)
+                {
+                    got_gas_flex_unit_rate = false;
+                    got_elec_flex_unit_rate = false;
+                }
                 break;
             }
         }
     }
 }
 
+void get_display_digits(double value, uint8_t * display_digits, uint32_t * dp_pos)
+{
+    int32_t value_int = (int32_t)(value * 100.0);
+    if (value_int >= 100000)        // >= 1000.00 out of range
+    {
+        display_digits[0] = 0x0A;
+        display_digits[1] = 1;
+        display_digits[2] = 0x0A;
+        *dp_pos = 4;     // Decimal point in 3rd position
+    }
+    else if (value_int >= 10000)         // 100.00 - 999.99
+    {
+        display_digits[0] = value_int / 10000ul % 10;
+        display_digits[1] = value_int / 1000ul % 10;
+        display_digits[2] = value_int / 100ul % 10;
+        *dp_pos = 4;     // Decimal point in 3rd position
+    }
+    else if (value_int >= 1000)     // 10.00 - 99.99
+    {
+        display_digits[0] = value_int / 1000ul % 10;
+        display_digits[1] = value_int / 100ul % 10;
+        display_digits[2] = value_int / 10ul % 10;
+        *dp_pos = 2;     // Decimal point in 2nd position
+    }
+    else if (value_int >= 0)        // 0.00 - 9.99
+    {
+        display_digits[0] = value_int / 100ul % 10;
+        display_digits[1] = value_int / 10ul % 10;
+        display_digits[2] = value_int % 10;
+        *dp_pos = 1;     // Decimal point in 1st position
+    }
+    else if (value_int > -1000)     // -9.90 to -0.10
+    {
+        display_digits[0] = 0x0B;
+        display_digits[1] = (value_int * -1) / 100ul % 10;
+        display_digits[2] = (value_int * -1) / 10ul % 10;
+        *dp_pos = 2;     // Decimal point in 2nd position
+    }
+    else if (value_int > -10000)    // -99.9 to -10
+    {
+        display_digits[0] = 0x0B;
+        display_digits[1] = (value_int * -1) / 1000ul % 10;
+        display_digits[2] = (value_int * -1) / 100ul % 10;
+        *dp_pos = 4;     // Decimal point in 3rd position
+    }
+    else                                // Out of range (negative)
+    {
+        display_digits[0] = 0x0B;
+        display_digits[1] = 1;
+        display_digits[2] = 0x0A;
+        *dp_pos = 0;     // Decimal point off
+    }
+}
+
 // Callback for Timer Interrupt - displays the next digit on the 7-segment display on each run
 static bool IRAM_ATTR timer_group_isr_callback(void *args)
 {
-    int32_t unit_rate_int;
-    
-    uint8_t display_digits[6] = {1,2,3,4,5,6};
-    static uint8_t decimal_points = 0b111111;
-    uint8_t segment_patterns[12] = {0b00111111, 0b00000110, 0b01011011, 0b01001111, 0b01100110, 0b01101101, 0b01111100, 0b00000111, 0b01111111, 0b01100111, 0b00000000, 0b01000000};
-    const uint8_t pin_com[6] = {pin_com1, pin_com2, pin_com3, pin_com4, pin_com5, pin_com6};
-    uint8_t display_segments[6];
-    static uint8_t current_disp_index;
+    static uint8_t display_digits[NUM_OF_ANODES * 2] = {0,1,2,3,4,5,6,7,8,9,0,1,2,3,4,5,6,7,8,9,0,1,2,3,4,5,6,7,8,9,0,1};
+    static uint8_t display_segments[NUM_OF_ANODES * 2];
+    static uint32_t decimal_points = 0b111111;
+    const uint8_t segment_patterns[12] = {0b00111111, 0b00000110, 0b01011011, 0b01001111, 0b01100110, 0b01101101, 0b01111100, 0b00000111, 0b01111111, 0b01100111, 0b00000000, 0b01000000};
+    static uint8_t current_disp_index = 0;
     static uint8_t dim_cycle_counter = 0;
+    uint32_t dp_temp;
     
     // If first digit is about to be displayed, update display data
     if ((current_disp_index == 0) && (dim_cycle_counter == 0))
@@ -741,63 +902,10 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
         {
             // Generate numeric digits
             // Gas
-            unit_rate_int = (int32_t)(gas_unit_rate * 100.0);
-            if (unit_rate_int >= 100000)        // >= 1000.00 out of range
-            {
-                display_digits[0] = 0x0A;
-                display_digits[1] = 1;
-                display_digits[2] = 0x0A;
-                decimal_points &= 0b111000;
-                decimal_points |= 0b000100;     // Decimal point in 3rd position
-            }
-            else if (unit_rate_int >= 10000)         // 100.00 - 999.99
-            {
-                display_digits[0] = unit_rate_int / 10000ul % 10;
-                display_digits[1] = unit_rate_int / 1000ul % 10;
-                display_digits[2] = unit_rate_int / 100ul % 10;
-                decimal_points &= 0b111000;
-                decimal_points |= 0b000100;     // Decimal point in 3rd position
-            }
-            else if (unit_rate_int >= 1000)     // 10.00 - 99.99
-            {
-                display_digits[0] = unit_rate_int / 1000ul % 10;
-                display_digits[1] = unit_rate_int / 100ul % 10;
-                display_digits[2] = unit_rate_int / 10ul % 10;
-                decimal_points &= 0b111000;
-                decimal_points |= 0b000010;     // Decimal point in 2nd position
-            }
-            else if (unit_rate_int >= 0)        // 0.00 - 9.99
-            {
-                display_digits[0] = unit_rate_int / 100ul % 10;
-                display_digits[1] = unit_rate_int / 10ul % 10;
-                display_digits[2] = unit_rate_int % 10;
-                decimal_points &= 0b111000;
-                decimal_points |= 0b000001;     // Decimal point in 1st position
-            }
-            else if (unit_rate_int > -1000)     // -9.90 to -0.10
-            {
-                display_digits[0] = 0x0B;
-                display_digits[1] = (unit_rate_int * -1) / 100ul % 10;
-                display_digits[2] = (unit_rate_int * -1) / 10ul % 10;
-                decimal_points &= 0b111000;
-                decimal_points |= 0b000010;     // Decimal point in 2nd position
-            }
-            else if (unit_rate_int > -10000)    // -99.9 to -10
-            {
-                display_digits[0] = 0x0B;
-                display_digits[1] = (unit_rate_int * -1) / 1000ul % 10;
-                display_digits[2] = (unit_rate_int * -1) / 100ul % 10;
-                decimal_points &= 0b111000;
-                decimal_points |= 0b000100;     // Decimal point in 3rd position
-            }
-            else                                // Out of range (negative)
-            {
-                display_digits[0] = 0x0B;
-                display_digits[1] = 1;
-                display_digits[2] = 0x0A;
-                decimal_points &= 0b111000;
-                decimal_points |= 0b000000;     // Decimal point in 3rd position
-            }
+            get_display_digits(gas_unit_rate, &display_digits[0], &dp_temp);
+            
+            decimal_points &= 0b111000;
+            decimal_points |= dp_temp;
         }
         else
         {
@@ -810,63 +918,10 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
         if (timeSet && wifi_connected && got_elec_unit_rate)
         {
             // Electricity
-            unit_rate_int = (int32_t)(elec_unit_rate * 100.0);
-            if (unit_rate_int >= 100000)        // >= 1000.00
-            {
-                display_digits[3] = 1;
-                display_digits[4] = 0x0A;
-                display_digits[5] = 0x0A;
-                decimal_points &= 0b000111;
-                decimal_points |= 0b100000;     // Decimal point in 3rd position
-            }
-            else if (unit_rate_int >= 10000)         // 100.00 - 999.99
-            {
-                display_digits[3] = unit_rate_int / 10000ul % 10;
-                display_digits[4] = unit_rate_int / 1000ul % 10;
-                display_digits[5] = unit_rate_int / 100ul % 10;
-                decimal_points &= 0b000111;
-                decimal_points |= 0b100000;     // Decimal point in 3rd position
-            }
-            else if (unit_rate_int >= 1000)     // 10.00 - 99.99
-            {
-                display_digits[3] = unit_rate_int / 1000ul % 10;
-                display_digits[4] = unit_rate_int / 100ul % 10;
-                display_digits[5] = unit_rate_int / 10ul % 10;
-                decimal_points &= 0b000111;
-                decimal_points |= 0b010000;     // Decimal point in 2nd position
-            }
-            else if (unit_rate_int >= 0)        // 1.00 - 9.99
-            {
-                display_digits[3] = unit_rate_int / 100ul % 10;
-                display_digits[4] = unit_rate_int / 10ul % 10;
-                display_digits[5] = unit_rate_int % 10;
-                decimal_points &= 0b000111;
-                decimal_points |= 0b001000;     // Decimal point in 1st position
-            }
-            else if (unit_rate_int > -1000)     // -9.9 to -0.1
-            {
-                display_digits[3] = 0x0B;
-                display_digits[4] = (unit_rate_int * -1) / 100ul % 10;
-                display_digits[5] = (unit_rate_int * -1) / 10ul % 10;
-                decimal_points &= 0b000111;
-                decimal_points |= 0b010000;     // Decimal point in 2nd position
-            }
-            else if (unit_rate_int > -10000)    // -99.9 to -10
-            {
-                display_digits[3] = 0x0B;
-                display_digits[4] = (unit_rate_int * -1) / 1000ul % 10;
-                display_digits[5] = (unit_rate_int * -1) / 100ul % 10;
-                decimal_points &= 0b000111;
-                decimal_points |= 0b100000;     // Decimal point in 3rd position
-            }
-            else                                // Out of range (negative)
-            {
-                display_digits[3] = 0x0B;
-                display_digits[4] = 1;
-                display_digits[5] = 0x0A;
-                decimal_points &= 0b000111;
-                decimal_points |= 0b000000;     // Decimal point in 3rd position
-            }
+            get_display_digits(elec_unit_rate, &display_digits[3], &dp_temp);
+            
+            decimal_points &= 0b000111;
+            decimal_points |= dp_temp << 3;
         }
         else
         {
@@ -876,48 +931,110 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
             display_digits[5] = got_elec_unit_rate ? 0xB : 0xA;
         }
         
+        if (timeSet && wifi_connected && got_gas_flex_unit_rate)
+        {
+            // Generate numeric digits
+            // Gas
+            get_display_digits(gas_flex_unit_rate, &display_digits[16], &dp_temp);
+            
+            decimal_points &= 0b1110001111111111111111;
+            decimal_points |= dp_temp << 16;
+        }
+        else
+        {
+            // generate dashes pattern
+            display_digits[16] = wifi_connected ? 0xB : 0xA;
+            display_digits[17] = timeSet ? 0xB : 0xA;
+            display_digits[18] = got_gas_flex_unit_rate ? 0xB : 0xA;
+        }
+        
+        if (timeSet && wifi_connected && got_elec_flex_unit_rate)
+        {
+            // Electricity
+            get_display_digits(elec_flex_unit_rate, &display_digits[19], &dp_temp);
+            
+            decimal_points &= 0b0001111111111111111111;
+            decimal_points |= dp_temp << 19;
+        }
+        else
+        {
+            // generate dashes pattern
+            display_digits[19] = wifi_connected ? 0xB : 0xA;
+            display_digits[20] = timeSet ? 0xB : 0xA;
+            display_digits[21] = got_elec_flex_unit_rate ? 0xB : 0xA;
+        }
+        
         // Get required segment patterns
-        for (uint8_t i = 0; i < 6; i++)
+        for (uint8_t i = 0; i < NUM_OF_ANODES * 2; i++)
         {
             display_segments[i] = segment_patterns[display_digits[i]];
         }
     }
     
     // Turn off all digits
-    gpio_set_level(pin_com1, 1);
-    gpio_set_level(pin_com2, 1);
-    gpio_set_level(pin_com3, 1);
-    gpio_set_level(pin_com4, 1);
-    gpio_set_level(pin_com5, 1);
-    gpio_set_level(pin_com6, 1);
+    // SPI code needed here
+    gpio_set_level(pin_SOE, 1);
     
     // Turn off all segments by setting specified bits high in 'Write 1 to set' register
-    REG_WRITE(GPIO_OUT_W1TS_REG, ((uint32_t)1 << pin_segA)
-                       | ((uint32_t)1 << pin_segB)
-                       | ((uint32_t)1 << pin_segC)
-                       | ((uint32_t)1 << pin_segD)
-                       | ((uint32_t)1 << pin_segE)
-                       | ((uint32_t)1 << pin_segF)
-                       | ((uint32_t)1 << pin_segG)
-                       | ((uint32_t)1 << pin_segDP));
+    GPIO.out_w1ts =      ((uint32_t)1 << pin_segAL)
+                       | ((uint32_t)1 << pin_segBL)
+                       | ((uint32_t)1 << pin_segCL)
+                       | ((uint32_t)1 << pin_segDL)
+                       | ((uint32_t)1 << pin_segEL)
+                       | ((uint32_t)1 << pin_segFL)
+                       | ((uint32_t)1 << pin_segGL)
+                       | ((uint32_t)1 << pin_segDPL)
+                       | ((uint32_t)1 << pin_segAR)
+                       | ((uint32_t)1 << pin_segBR);
+    GPIO.out1_w1ts.val = 
+                         ((uint32_t)1 << (pin_segCR - 32))
+                       | ((uint32_t)1 << (pin_segDR - 32))
+                       | ((uint32_t)1 << (pin_segER - 32))
+                       | ((uint32_t)1 << (pin_segFR - 32))
+                       | ((uint32_t)1 << (pin_segGR - 32))
+                       | ((uint32_t)1 << (pin_segDPR - 32));
     
     if (dim_cycle_counter >= (NUMBER_OF_BRIGHTNESS_SETTINGS - 1 - display_brightness))
     {
-        // Turn on required segments
-        REG_WRITE(GPIO_OUT_W1TC_REG,
-                             ((((display_segments[current_disp_index] & 0x01) >> 0)) << pin_segA )
-                           | ((((display_segments[current_disp_index] & 0x02) >> 1)) << pin_segB )
-                           | ((((display_segments[current_disp_index] & 0x04) >> 2)) << pin_segC )
-                           | ((((display_segments[current_disp_index] & 0x08) >> 3)) << pin_segD )
-                           | ((((display_segments[current_disp_index] & 0x10) >> 4)) << pin_segE )
-                           | ((((display_segments[current_disp_index] & 0x20) >> 5)) << pin_segF )
-                           | ((((display_segments[current_disp_index] & 0x40) >> 6)) << pin_segG )
-                           | ((((decimal_points >> current_disp_index & 0x01) >> 0)) << pin_segDP)
-                           );
-                           
         // Turn on required digit
-        //REG_WRITE(GPIO_OUT_W1TC_REG, (uint32_t)1 << pin_com[current_disp_index]);
-        gpio_set_level(pin_com[current_disp_index], 0);
+        // SPI code needed here
+        for (uint8_t i = 0; i < NUM_OF_ANODES; i++)
+        {
+            gpio_set_level(pin_SDAT, (NUM_OF_ANODES - 1 - current_disp_index) == i ? 0 : 1);
+            ets_delay_us(SR_DELAY_US);
+            gpio_set_level(pin_SCK, 1);
+            ets_delay_us(SR_DELAY_US);
+            gpio_set_level(pin_SCK, 0);
+        }
+        
+        ets_delay_us(SR_DELAY_US);
+        gpio_set_level(pin_SLAT, 1);
+        ets_delay_us(SR_DELAY_US);
+        gpio_set_level(pin_SLAT, 0);
+        ets_delay_us(SR_DELAY_US);
+        gpio_set_level(pin_SOE, 0);
+        
+        // Turn on required segments
+        GPIO.out_w1tc =
+                             ((((display_segments[current_disp_index] & 0x01) >> 0)) << pin_segAL )
+                           | ((((display_segments[current_disp_index] & 0x02) >> 1)) << pin_segBL )
+                           | ((((display_segments[current_disp_index] & 0x04) >> 2)) << pin_segCL )
+                           | ((((display_segments[current_disp_index] & 0x08) >> 3)) << pin_segDL )
+                           | ((((display_segments[current_disp_index] & 0x10) >> 4)) << pin_segEL )
+                           | ((((display_segments[current_disp_index] & 0x20) >> 5)) << pin_segFL )
+                           | ((((display_segments[current_disp_index] & 0x40) >> 6)) << pin_segGL )
+                           | ((((decimal_points >> current_disp_index & 0x01) >> 0)) << pin_segDPL)
+                           | ((((display_segments[current_disp_index + NUM_OF_ANODES] & 0x01) >> 0)) << pin_segAR )
+                           | ((((display_segments[current_disp_index + NUM_OF_ANODES] & 0x02) >> 1)) << pin_segBR )
+                           ;
+        GPIO.out1_w1tc.val = 
+                             ((((display_segments[current_disp_index + NUM_OF_ANODES] & 0x04) >> 2)) << (pin_segCR - 32) )
+                           | ((((display_segments[current_disp_index + NUM_OF_ANODES] & 0x08) >> 3)) << (pin_segDR - 32) )
+                           | ((((display_segments[current_disp_index + NUM_OF_ANODES] & 0x10) >> 4)) << (pin_segER - 32) )
+                           | ((((display_segments[current_disp_index + NUM_OF_ANODES] & 0x20) >> 5)) << (pin_segFR - 32) )
+                           | ((((display_segments[current_disp_index + NUM_OF_ANODES] & 0x40) >> 6)) << (pin_segGR - 32) )
+                           | ((((decimal_points >> (current_disp_index + NUM_OF_ANODES) & 0x01) >> 0)) << (pin_segDPR - 32) )
+                           ;
     }
     
     // There are NUMBER_OF_BRIGHTNESS_SETTINGS iterations of dim_cycle_counter where the display is turned off or on
@@ -930,14 +1047,18 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
     else
     {
         dim_cycle_counter = 0;
-        if (current_disp_index < 5)
+        do
         {
-            current_disp_index++;
+            if (current_disp_index < NUM_OF_ANODES - 1)
+            {
+                current_disp_index++;
+            }
+            else
+            {
+                current_disp_index = 0;
+            }
         }
-        else
-        {
-            current_disp_index = 0;
-        }
+        while ((ANODES_IN_USE >> current_disp_index) == 0);
     }
     
     
@@ -1022,8 +1143,10 @@ void get_light_level_task(void * pvParameters)
             adc_filter[i] = adc_filter[i+1];
         }
         // Get ADC reading and add to filter (invert so that higher value means brighter)
+        adc_reading = adc1_get_raw((adc1_channel_t)channel);
+        /*
         // Multiply by 2
-        adc_reading = (adc1_get_raw((adc1_channel_t)channel) << 2);
+        adc_reading = (adc_reading << 2);
         // Expand the upper half of the range and discard the lower half
         if (adc_reading > ((ADC_MAX_VALUE + 1) * 3))
         {
@@ -1033,6 +1156,7 @@ void get_light_level_task(void * pvParameters)
         {
             adc_reading = 0;
         }
+        */
         // Add to filter
         adc_filter[ADC_FILTER_LENGTH - 1] = ADC_MAX_VALUE - adc_reading;
         
@@ -1055,7 +1179,7 @@ void get_light_level_task(void * pvParameters)
             display_brightness = (display_brightness + NUMBER_OF_BRIGHTNESS_SETTINGS - 1) % NUMBER_OF_BRIGHTNESS_SETTINGS;
         }
         
-        //ESP_LOGI(TAG, "ADC value %d Brightness %d", adc_average, display_brightness);
+        ESP_LOGI(TAG, "ADC value %d Brightness %d", adc_average, display_brightness);
     }
 }
 
@@ -1075,25 +1199,56 @@ void app_main()
     gpio_config_t io_conf;
     io_conf.intr_type = (gpio_int_type_t)GPIO_PIN_INTR_DISABLE;
     io_conf.mode = GPIO_MODE_OUTPUT;
-    io_conf.pin_bit_mask = ((uint64_t)1 << pin_segA)
-                         | ((uint64_t)1 << pin_segB)
-                         | ((uint64_t)1 << pin_segC)
-                         | ((uint64_t)1 << pin_segD)
-                         | ((uint64_t)1 << pin_segE)
-                         | ((uint64_t)1 << pin_segF)
-                         | ((uint64_t)1 << pin_segG)
-                         | ((uint64_t)1 << pin_segDP)
-                         | ((uint64_t)1 << pin_com1)
-                         | ((uint64_t)1 << pin_com2)
-                         | ((uint64_t)1 << pin_com3)
-                         | ((uint64_t)1 << pin_com4)
-                         | ((uint64_t)1 << pin_com5)
-                         | ((uint64_t)1 << pin_com6);
+    io_conf.pin_bit_mask = ((uint64_t)1 << pin_segAL)
+                         | ((uint64_t)1 << pin_segBL)
+                         | ((uint64_t)1 << pin_segCL)
+                         | ((uint64_t)1 << pin_segDL)
+                         | ((uint64_t)1 << pin_segEL)
+                         | ((uint64_t)1 << pin_segFL)
+                         | ((uint64_t)1 << pin_segGL)
+                         | ((uint64_t)1 << pin_segDPL)
+                         | ((uint64_t)1 << pin_segAR)
+                         | ((uint64_t)1 << pin_segBR)
+                         | ((uint64_t)1 << pin_segCR)
+                         | ((uint64_t)1 << pin_segDR)
+                         | ((uint64_t)1 << pin_segER)
+                         | ((uint64_t)1 << pin_segFR)
+                         | ((uint64_t)1 << pin_segGR)
+                         | ((uint64_t)1 << pin_segDPR)
+                         | ((uint64_t)1 << pin_SLAT)
+                         | ((uint64_t)1 << pin_SOE)
+                         | ((uint64_t)1 << pin_SDAT)
+                         | ((uint64_t)1 << pin_SCK);
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
     ret = gpio_config(&io_conf);
     
 	ESP_ERROR_CHECK(ret);
+    
+    /*
+    spi_bus_config_t buscfg={
+        .miso_io_num = -1,
+        .mosi_io_num = pin_SDAT,
+        .sclk_io_num = pin_SCK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = 32,
+    };
+    //Initialize the SPI bus
+    ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    ESP_ERROR_CHECK(ret);
+    
+    spi_device_interface_config_t devcfg={
+        .command_bits=16,
+        .address_bits=0,
+        .cs_ena_pretrans=2,
+        .cs_ena_posttrans=2,
+        .clock_speed_hz=1000000,
+        .spics_io_num=pin_SLAT,
+    }
+    ret = spi_bus_add_device(SPi2_HOST, &devcfg, &spihandle);
+    ESP_ERROR_CHECK(ret);
+    */
     
     // FreeRTOS task setup
     
