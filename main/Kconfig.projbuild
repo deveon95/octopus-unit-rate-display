@@ -18,6 +18,12 @@ menu "Application Configuration"
 		help
 			Set the Maximum retry to avoid station reconnecting to the AP unlimited when the AP is really inexistent.
 
+	config ESP_TARIFF
+		string "Tariff code Tracker"
+		default "SILVER-FLEX-22-11-25"
+		help
+			Set your product code
+
 	config ESP_TARIFF_ELEC
 		string "Tariff code Elec Tracker"
 		default "E-1R-SILVER-FLEX-22-11-25-E"
@@ -30,17 +36,17 @@ menu "Application Configuration"
 		help
 			Set your tariff code; includes fuel type and region code
             
-	config ESP_TARIFF_FLEX
-		string "Product name for Flexible tariff"
-		default "VAR-22-11-01"
-		help
-			Set your product code
-            
 	config ESP_TARIFF_FLEX_ENABLE
 		int "Enable display of the Flexible tariff"
 		default 1
 		help
 			0 = Disabled, 1 = Enabled
+            
+	config ESP_TARIFF_FLEX
+		string "Product name for Flexible tariff"
+		default "VAR-22-11-01"
+		help
+			Set your product code
             
 	config ESP_TARIFF_ELEC_FLEX
 		string "Tariff code Elec Flexible"

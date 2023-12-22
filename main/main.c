@@ -468,7 +468,7 @@ double parse_object(cJSON *root, char * date, uint8_t tariff_type, double * agil
     
     if (tariff_type == TARIFF_TYPE_TRACKER)
     {
-        cJSON *item = cJSON_GetObjectItem(root,"periods");
+        cJSON *item = cJSON_GetObjectItem(root,"results");
         if (item == NULL)
         {
             ESP_LOGE(TAG, "item pointer is NULL");
@@ -479,11 +479,11 @@ double parse_object(cJSON *root, char * date, uint8_t tariff_type, double * agil
             for (i = 0 ; i < cJSON_GetArraySize(item) ; i++)
             {
                 cJSON * subitem = cJSON_GetArrayItem(item, i);
-                name = cJSON_GetObjectItem(subitem, "date");
-                unit_rate = cJSON_GetObjectItem(subitem, "unit_rate");
+                name = cJSON_GetObjectItem(subitem, "valid_from");
+                unit_rate = cJSON_GetObjectItem(subitem, "value_inc_vat");
                 ESP_LOGI(TAG, "date: %s unit rate: %f", name->valuestring, unit_rate->valuedouble);
                 // Check if the current array entry matches the specified date
-                if (strcmp(name->valuestring, date) == 0)
+                if (strncmp(name->valuestring, date, 10) == 0)
                 {
                     price = unit_rate->valuedouble;
                 }
@@ -847,7 +847,7 @@ void get_unit_rates_task(void * pvParameters)
         if (!got_elec_unit_rate)
         {
             // Generate url for elec tariff api
-            sprintf(url, "https://octopus.energy/api/v1/tracker/%s/daily/current/1/1/", CONFIG_ESP_TARIFF_ELEC);
+            sprintf(url, "https://api.octopus.energy/v1/products/%s/electricity-tariffs/%s/standard-unit-rates/", CONFIG_ESP_TARIFF, CONFIG_ESP_TARIFF_ELEC);
             ESP_LOGI(TAG, "url=%s",url);
             // Do HTTP request and parse
             elec_unit_rate = http_client(url, &got_elec_unit_rate, TARIFF_TYPE_TRACKER, NULL, NULL); 
@@ -856,7 +856,7 @@ void get_unit_rates_task(void * pvParameters)
         if (!got_gas_unit_rate)
         {
             // Generate url for gas tariff api
-            sprintf(url, "https://octopus.energy/api/v1/tracker/%s/daily/current/1/1/", CONFIG_ESP_TARIFF_GAS);
+            sprintf(url, "https://api.octopus.energy/v1/products/%s/gas-tariffs/%s/standard-unit-rates/", CONFIG_ESP_TARIFF, CONFIG_ESP_TARIFF_GAS);
             ESP_LOGI(TAG, "url=%s",url);
             // Do HTTP request and parse
             gas_unit_rate = http_client(url, &got_gas_unit_rate, TARIFF_TYPE_TRACKER, NULL, NULL);
