@@ -22,30 +22,54 @@ menu "Application Configuration"
 		string "Tariff code Elec Tracker"
 		default "E-1R-SILVER-FLEX-22-11-25-E"
 		help
-			Set your tariff code
+			Set your tariff code; includes fuel type and region code
 
 	config ESP_TARIFF_GAS
 		string "Tariff code Gas Tracker"
 		default "G-1R-SILVER-FLEX-22-11-25-E"
 		help
-			Set your tariff code
+			Set your tariff code; includes fuel type and region code
             
 	config ESP_TARIFF_FLEX
 		string "Product name for Flexible tariff"
 		default "VAR-22-11-01"
 		help
-			Set your tariff code
+			Set your product code
+            
+	config ESP_TARIFF_FLEX_ENABLE
+		int "Enable display of the Flexible tariff"
+		default 1
+		help
+			0 = Disabled, 1 = Enabled
             
 	config ESP_TARIFF_ELEC_FLEX
 		string "Tariff code Elec Flexible"
 		default "E-1R-VAR-22-11-01-E"
 		help
-			Set your tariff code
+			Set your tariff code; includes fuel type and region code
 
 	config ESP_TARIFF_GAS_FLEX
 		string "Tariff code Gas Flexible"
 		default "G-1R-VAR-22-11-01-E"
 		help
-			Set your tariff code
+			Set your tariff code; includes fuel type and region code
+            
+	config ESP_TARIFF_AGILE_ENABLE
+		int "Enable display of the Agile tariff"
+		default 1
+		help
+			0 = Disabled, 1 = Enabled
+            
+    config ESP_TARIFF_AGILE
+        string "Product code for Agile tariff"
+        default "AGILE-FLEX-BB-23-02-08"
+        help
+            Set the product code
+    
+    config ESP_TARIFF_ELEC_AGILE
+        string "Tariff code for Elec Agile"
+        default "E-1R-AGILE-FLEX-BB-23-02-08-E"
+        help
+            Set your tariff code; includes fuel type and region code
 
 endmenu

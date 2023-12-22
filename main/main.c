@@ -44,7 +44,8 @@
 
 #define SR_DELAY_US 1
 #define NUM_OF_ANODES 16
-#define ANODES_IN_USE 0b0011111100111111
+#define ANODES_IN_USE 0b0000000000111111
+//#define ANODES_IN_USE 0b0011111100111111
 
 #define pin_segAR 14
 #define pin_segBR 21
@@ -68,6 +69,10 @@
 #define pin_SDAT 11
 #define pin_SCK 12
 
+#define pin_BUTTON2 0
+#define pin_BUTTON3 2
+#define pin_BUTTON4 3
+
 #define TIMER_DIVIDER         (16)  //  Hardware timer clock divider
 #define TIMER_SCALE           ((TIMER_BASE_CLK / 10000)/ TIMER_DIVIDER)  // convert counter value to seconds
 
@@ -88,20 +93,27 @@ bool got_gas_unit_rate = false;
 bool got_elec_unit_rate = false;
 bool got_gas_flex_unit_rate = false;
 bool got_elec_flex_unit_rate = false;
+bool got_elec_agile_unit_rate = false;
 #define TARIFF_TYPE_TRACKER 0
 #define TARIFF_TYPE_FLEXIBLE 1
+#define TARIFF_TYPE_AGILE 2
 
 double gas_unit_rate = 0.0;
 double elec_unit_rate = 0.0;
 double gas_flex_unit_rate = 0.0;
 double elec_flex_unit_rate = 0.0;
+double elec_agile_rates[48];
+uint64_t elec_agile_validity = 0;
+uint8_t agile_time = 0;
+
+#define FETCHER_WDOG_LIMIT_IN_SECONDS (60*15)
 
 #define NUMBER_OF_BRIGHTNESS_SETTINGS 4
 #define BRIGHTNESS_HYSTERESIS 100
 // brightness of the display (0 to 3)
 uint8_t display_brightness = 3;
 
-#define ADC_FILTER_LENGTH 10
+#define ADC_FILTER_LENGTH 30
 #define ADC_MAX_VALUE 4095
 #define ADC_HYSTERESIS 200
 static const adc_channel_t channel = ADC_CHANNEL_0;     //GPIO1 for ADC1
@@ -120,6 +132,8 @@ static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_FAIL_BIT BIT1
 
 static const char *TAG = "JSON";
+static const char *TAG_FW = "FWD";
+static const char *TAG_ADC = "ADC";
 
 static int s_retry_num = 0;
 
@@ -441,9 +455,10 @@ esp_err_t http_client_content_get(char * url, char * response_buffer)
 }
 
 // Parse the JSON structure and return the unit rate for the specified date
-double parse_object(cJSON *root, char * date, uint8_t tariff_type)
+double parse_object(cJSON *root, char * date, uint8_t tariff_type, double * agile_rates_ref, uint64_t * agile_validity_ref)
 {
     double price = 0.0;
+    uint8_t agile_hour = 0;
     cJSON* name = NULL;
     cJSON* unit_rate = NULL;
     cJSON* payment_method = NULL;
@@ -532,10 +547,61 @@ double parse_object(cJSON *root, char * date, uint8_t tariff_type)
             }
         }
     }
+    else if (tariff_type == TARIFF_TYPE_AGILE)
+    {
+        *agile_validity_ref = 0;
+        cJSON *item = cJSON_GetObjectItem(root,"results");
+        if (item == NULL)
+        {
+            ESP_LOGE(TAG, "item pointer is NULL");
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Array size: %d", cJSON_GetArraySize(item));
+            for (i = 0 ; i < cJSON_GetArraySize(item) ; i++)
+            {
+                cJSON * subitem = cJSON_GetArrayItem(item, i);
+                name = cJSON_GetObjectItem(subitem, "valid_from");
+                ESP_LOGI(TAG, "valid_from: %s", name->valuestring);
+                unit_rate = cJSON_GetObjectItem(subitem, "value_inc_vat");
+                ESP_LOGI(TAG, "unit rate: %f", unit_rate->valuedouble);
+                ESP_LOGI(TAG, "from: %s unit rate: %f", name->valuestring, unit_rate->valuedouble);
+                
+                // Parse the valid-from string (name->valuestring)
+                // Format is YYYY-MM-DDTHH:MM:SSZ
+                // Check that the date part matches today's date, by comparing first 10 characters
+                // with today's date string, because yesterday/tomorrow could be there as well
+                if (strncmp(name->valuestring, date, 10) == 0)
+                {
+                    price = unit_rate->valuedouble;
+                    // Get hour for current entry from valid-from string
+                    agile_hour = (name->valuestring[11] - 48 ) * 10 + (name->valuestring[12] - 48);
+                    // Put the prices into the array
+                    // 00:00 agile_rates_ref[0]
+                    // 00:30 agile_rates_ref[1]
+                    // 01:00 agile_rates_ref[2]
+                    // and so on
+                    if (agile_hour <= 23)
+                    {
+                        if (name->valuestring[14] == '0')
+                        {
+                            agile_rates_ref[agile_hour * 2] = price;
+                            *agile_validity_ref |= ((uint64_t)1 << (agile_hour * 2));
+                        }
+                        else if (name->valuestring[14] == '3')
+                        {
+                            agile_rates_ref[agile_hour * 2 + 1] = price;
+                            *agile_validity_ref |= ((uint64_t)1 << (agile_hour * 2 + 1));
+                        }
+                    }
+                }
+            }
+        }
+    }
     return price;
 }
 
-double http_client(char * url, bool * got_unit_rate, uint8_t tariff_type)
+double http_client(char * url, bool * got_unit_rate, uint8_t tariff_type, double * agile_rates_ref, uint64_t * agile_validity_ref)
 {
     double unit_rate = 0.0;
 	// Get content length from event handler
@@ -586,8 +652,18 @@ double http_client(char * url, bool * got_unit_rate, uint8_t tariff_type)
         
         
         ESP_LOGI(TAG, "Attempt parse.....");
-        unit_rate = parse_object(root, time_string, tariff_type);
+        unit_rate = parse_object(root, time_string, tariff_type, agile_rates_ref, agile_validity_ref);
         ESP_LOGI(TAG, "price returned: %f", unit_rate);
+        
+        if (tariff_type == TARIFF_TYPE_AGILE)
+        {
+            for (uint8_t i = 0; i < 48; i++)
+            {
+                ESP_LOGI(TAG, "Agile price entry %d: %f", i, agile_rates_ref[i]);
+            }
+            ESP_LOGI(TAG, "Agile validity: %llX", *agile_validity_ref);
+        }
+        
         // Check for null pointer then set
         if (got_unit_rate)
             *got_unit_rate = true;
@@ -751,6 +827,7 @@ void get_unit_rates_task(void * pvParameters)
     uint8_t hour_last;
     uint8_t day_last;
     struct tm time_struct;
+    char url[255];
     
     while(1)
     {
@@ -766,33 +843,64 @@ void get_unit_rates_task(void * pvParameters)
         // Print tariff names in debug console
         ESP_LOGI(TAG, "Elec tariff=%s",CONFIG_ESP_TARIFF_ELEC);
         ESP_LOGI(TAG, "Gas tariff=%s",CONFIG_ESP_TARIFF_GAS);
-        // Generate url for elec tariff api
-        char url[128];
-        sprintf(url, "https://octopus.energy/api/v1/tracker/%s/daily/current/1/1/", CONFIG_ESP_TARIFF_ELEC);
-        ESP_LOGI(TAG, "url=%s",url);
-        // Do HTTP request and parse
-        elec_unit_rate = http_client(url, &got_elec_unit_rate, TARIFF_TYPE_TRACKER); 
-        // Generate url for gas tariff api
-        sprintf(url, "https://octopus.energy/api/v1/tracker/%s/daily/current/1/1/", CONFIG_ESP_TARIFF_GAS);
-        ESP_LOGI(TAG, "url=%s",url);
-        // Do HTTP request and parse
-        gas_unit_rate = http_client(url, &got_gas_unit_rate, TARIFF_TYPE_TRACKER);
+        
+        if (!got_elec_unit_rate)
+        {
+            // Generate url for elec tariff api
+            sprintf(url, "https://octopus.energy/api/v1/tracker/%s/daily/current/1/1/", CONFIG_ESP_TARIFF_ELEC);
+            ESP_LOGI(TAG, "url=%s",url);
+            // Do HTTP request and parse
+            elec_unit_rate = http_client(url, &got_elec_unit_rate, TARIFF_TYPE_TRACKER, NULL, NULL); 
+        }
+        
+        if (!got_gas_unit_rate)
+        {
+            // Generate url for gas tariff api
+            sprintf(url, "https://octopus.energy/api/v1/tracker/%s/daily/current/1/1/", CONFIG_ESP_TARIFF_GAS);
+            ESP_LOGI(TAG, "url=%s",url);
+            // Do HTTP request and parse
+            gas_unit_rate = http_client(url, &got_gas_unit_rate, TARIFF_TYPE_TRACKER, NULL, NULL);
+        }
         
         // Flexible tariff
-        // Get tariff information
-        // Print tariff names in debug console
-        ESP_LOGI(TAG, "Elec tariff=%s",CONFIG_ESP_TARIFF_ELEC_FLEX);
-        ESP_LOGI(TAG, "Gas tariff=%s",CONFIG_ESP_TARIFF_GAS_FLEX);
-        // Generate url for elec tariff api
-        sprintf(url, "https://api.octopus.energy/v1/products/%s/electricity-tariffs/%s/standard-unit-rates/", CONFIG_ESP_TARIFF_FLEX, CONFIG_ESP_TARIFF_ELEC_FLEX);
-        ESP_LOGI(TAG, "url=%s",url);
-        // Do HTTP request and parse
-        elec_flex_unit_rate = http_client(url, &got_elec_flex_unit_rate, TARIFF_TYPE_FLEXIBLE); 
-        // Generate url for gas tariff api
-        sprintf(url, "https://api.octopus.energy/v1/products/%s/gas-tariffs/%s/standard-unit-rates/", CONFIG_ESP_TARIFF_FLEX, CONFIG_ESP_TARIFF_GAS_FLEX);
-        ESP_LOGI(TAG, "url=%s",url);
-        // Do HTTP request and parse
-        gas_flex_unit_rate = http_client(url, &got_gas_flex_unit_rate, TARIFF_TYPE_FLEXIBLE);
+        if (CONFIG_ESP_TARIFF_FLEX_ENABLE)
+        {
+            // Get tariff information
+            // Print tariff names in debug console
+            ESP_LOGI(TAG, "Elec tariff=%s",CONFIG_ESP_TARIFF_ELEC_FLEX);
+            ESP_LOGI(TAG, "Gas tariff=%s",CONFIG_ESP_TARIFF_GAS_FLEX);
+            
+            if (!got_elec_flex_unit_rate)
+            {
+                // Generate url for elec tariff api
+                sprintf(url, "https://api.octopus.energy/v1/products/%s/electricity-tariffs/%s/standard-unit-rates/", CONFIG_ESP_TARIFF_FLEX, CONFIG_ESP_TARIFF_ELEC_FLEX);
+                ESP_LOGI(TAG, "url=%s",url);
+                // Do HTTP request and parse
+                elec_flex_unit_rate = http_client(url, &got_elec_flex_unit_rate, TARIFF_TYPE_FLEXIBLE, NULL, NULL); 
+            }
+            
+            if (!got_gas_flex_unit_rate)
+            {
+                // Generate url for gas tariff api
+                sprintf(url, "https://api.octopus.energy/v1/products/%s/gas-tariffs/%s/standard-unit-rates/", CONFIG_ESP_TARIFF_FLEX, CONFIG_ESP_TARIFF_GAS_FLEX);
+                ESP_LOGI(TAG, "url=%s",url);
+                // Do HTTP request and parse
+                gas_flex_unit_rate = http_client(url, &got_gas_flex_unit_rate, TARIFF_TYPE_FLEXIBLE, NULL, NULL);
+            }
+        }
+        
+        // Agile tariff
+        if (CONFIG_ESP_TARIFF_AGILE_ENABLE && !got_elec_agile_unit_rate)
+        {
+            // Get tariff information
+            // Print tariff names in debug console
+            ESP_LOGI(TAG, "Elec tariff=%s",CONFIG_ESP_TARIFF_ELEC_AGILE);
+            // Generate url for elec tariff api
+            sprintf(url, "https://api.octopus.energy/v1/products/%s/electricity-tariffs/%s/standard-unit-rates/", CONFIG_ESP_TARIFF_AGILE, CONFIG_ESP_TARIFF_ELEC_AGILE);
+            ESP_LOGI(TAG, "url=%s",url);
+            // Do HTTP request and parse
+            http_client(url, &got_elec_agile_unit_rate, TARIFF_TYPE_AGILE,elec_agile_rates, &elec_agile_validity); 
+        }
         
         
         ESP_LOGI(TAG, "Reached the end");
@@ -803,6 +911,7 @@ void get_unit_rates_task(void * pvParameters)
         day_last = time_struct.tm_mday;
         ESP_LOGI(TAG, "hour_last set to %d", hour_last);
         ESP_LOGI(TAG, "day_last set to %d", day_last);
+        agile_time = (time_struct.tm_hour * 2) + (time_struct.tm_min / 30);
     
         while(1)
         {
@@ -812,17 +921,29 @@ void get_unit_rates_task(void * pvParameters)
             // sometimes the day's rates are not available until several hours into the day.
             time_now = time(NULL);
             gmtime_r(&time_now, &time_struct);
+            agile_time = (time_struct.tm_hour * 2) + (time_struct.tm_min / 30);
             if (time_struct.tm_hour != hour_last)
             {
-                got_gas_unit_rate = false;
-                got_elec_unit_rate = false;
+                // Move the got_x_rate statements here to refresh prices hourly instead
+                
                 ESP_LOGI(TAG, "time_struct.tm_hour %d differs from hour_last %d", time_struct.tm_hour, hour_last);
-                // Check for change in current day for flexible tariff
-                // This updates much less frequently so no need to refresh it hourly
+                // Check for change in current day and update prices daily
                 if (time_struct.tm_mday != day_last)
                 {
+                    got_gas_unit_rate = false;
+                    got_elec_unit_rate = false;
                     got_gas_flex_unit_rate = false;
                     got_elec_flex_unit_rate = false;
+                    got_elec_agile_unit_rate = false;
+                }
+                // Tracker API doesn't always have the correct price available on time.
+                // An incorrect price is returned by the API rather than an error
+                // so all we can do is refresh it a few times overnight as it should be
+                // correct within a few hours.
+                if ((time_struct.tm_hour == 3) || (time_struct.tm_hour == 6))
+                {
+                    got_gas_unit_rate = false;
+                    got_elec_unit_rate = false;
                 }
                 break;
             }
@@ -889,15 +1010,23 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
 {
     static uint8_t display_digits[NUM_OF_ANODES * 2] = {0,1,2,3,4,5,6,7,8,9,0,1,2,3,4,5,6,7,8,9,0,1,2,3,4,5,6,7,8,9,0,1};
     static uint8_t display_segments[NUM_OF_ANODES * 2];
-    static uint32_t decimal_points = 0b111111;
+    static uint32_t decimal_points = 0;
     const uint8_t segment_patterns[12] = {0b00111111, 0b00000110, 0b01011011, 0b01001111, 0b01100110, 0b01101101, 0b01111100, 0b00000111, 0b01111111, 0b01100111, 0b00000000, 0b01000000};
     static uint8_t current_disp_index = 0;
     static uint8_t dim_cycle_counter = 0;
     uint32_t dp_temp;
+    bool button_held = !gpio_get_level(pin_BUTTON2);
+    bool display_agile = 0;
+    
+    if (CONFIG_ESP_TARIFF_AGILE_ENABLE)
+    {
+        display_agile = !button_held;
+    }
     
     // If first digit is about to be displayed, update display data
     if ((current_disp_index == 0) && (dim_cycle_counter == 0))
     {
+        // Right hand displays
         if (timeSet && wifi_connected && got_gas_unit_rate)
         {
             // Generate numeric digits
@@ -931,37 +1060,67 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
             display_digits[5] = got_elec_unit_rate ? 0xB : 0xA;
         }
         
-        if (timeSet && wifi_connected && got_gas_flex_unit_rate)
+        // Left hand display
+        if (display_agile)
         {
-            // Generate numeric digits
-            // Gas
-            get_display_digits(gas_flex_unit_rate, &display_digits[16], &dp_temp);
+            // Gas - not applicable to agile
+            display_digits[16] = 10;
+            display_digits[17] = 10;
+            display_digits[18] = 10;
             
             decimal_points &= 0b1110001111111111111111;
-            decimal_points |= dp_temp << 16;
-        }
-        else
-        {
-            // generate dashes pattern
-            display_digits[16] = wifi_connected ? 0xB : 0xA;
-            display_digits[17] = timeSet ? 0xB : 0xA;
-            display_digits[18] = got_gas_flex_unit_rate ? 0xB : 0xA;
-        }
-        
-        if (timeSet && wifi_connected && got_elec_flex_unit_rate)
-        {
-            // Electricity
-            get_display_digits(elec_flex_unit_rate, &display_digits[19], &dp_temp);
             
-            decimal_points &= 0b0001111111111111111111;
-            decimal_points |= dp_temp << 19;
+            if (timeSet && wifi_connected && got_elec_agile_unit_rate && ((elec_agile_validity >> agile_time) & 1))
+            {
+                // Electricity
+                get_display_digits(elec_agile_rates[agile_time], &display_digits[19], &dp_temp);
+                
+                decimal_points &= 0b0001111111111111111111;
+                decimal_points |= dp_temp << 19;
+            }
+            else
+            {
+                // generate dashes pattern
+                display_digits[19] = wifi_connected ? 0xB : 0xA;
+                display_digits[20] = timeSet ? 0xB : 0xA;
+                display_digits[21] = got_elec_agile_unit_rate ? 0xB : 0xA;
+            }
+
         }
         else
         {
-            // generate dashes pattern
-            display_digits[19] = wifi_connected ? 0xB : 0xA;
-            display_digits[20] = timeSet ? 0xB : 0xA;
-            display_digits[21] = got_elec_flex_unit_rate ? 0xB : 0xA;
+            if (timeSet && wifi_connected && got_gas_flex_unit_rate)
+            {
+                // Generate numeric digits
+                // Gas
+                get_display_digits(gas_flex_unit_rate, &display_digits[16], &dp_temp);
+                
+                decimal_points &= 0b1110001111111111111111;
+                decimal_points |= dp_temp << 16;
+            }
+            else
+            {
+                // generate dashes pattern
+                display_digits[16] = wifi_connected ? 0xB : 0xA;
+                display_digits[17] = timeSet ? 0xB : 0xA;
+                display_digits[18] = got_gas_flex_unit_rate ? 0xB : 0xA;
+            }
+            
+            if (timeSet && wifi_connected && got_elec_flex_unit_rate)
+            {
+                // Electricity
+                get_display_digits(elec_flex_unit_rate, &display_digits[19], &dp_temp);
+                
+                decimal_points &= 0b0001111111111111111111;
+                decimal_points |= dp_temp << 19;
+            }
+            else
+            {
+                // generate dashes pattern
+                display_digits[19] = wifi_connected ? 0xB : 0xA;
+                display_digits[20] = timeSet ? 0xB : 0xA;
+                display_digits[21] = got_elec_flex_unit_rate ? 0xB : 0xA;
+            }
         }
         
         // Get required segment patterns
@@ -1129,13 +1288,13 @@ void get_light_level_task(void * pvParameters)
     adc1_config_width(width);
     adc1_config_channel_atten(channel, atten);
     uint16_t adc_filter[ADC_FILTER_LENGTH];
-    uint16_t adc_average = 0;
+    uint32_t adc_average = 0;
     uint16_t adc_reading;
     
     while(1)
     {
-        // 100ms sampling interval
-        vTaskDelay(100 / portTICK_RATE_MS);
+        // 50ms sampling interval
+        vTaskDelay(50 / portTICK_RATE_MS);
         
         // Move entries in the filter along
         for (uint8_t i = 0; i < ADC_FILTER_LENGTH - 1; i++)
@@ -1164,28 +1323,70 @@ void get_light_level_task(void * pvParameters)
         adc_average = 0;
         for (uint8_t i = 0; i < ADC_FILTER_LENGTH; i++)
         {
-            adc_average += adc_filter[i];
+            adc_average += (uint32_t)adc_filter[i];
         }
-        adc_average /= ADC_FILTER_LENGTH;
+        adc_average /= (uint32_t)ADC_FILTER_LENGTH;
         
         // Calculate LED brightness with hysteresis
         int adc_range_per_level = ADC_MAX_VALUE / NUMBER_OF_BRIGHTNESS_SETTINGS;
         int upper_limit = display_brightness * adc_range_per_level + adc_range_per_level + BRIGHTNESS_HYSTERESIS;
         int lower_limit = display_brightness * adc_range_per_level - BRIGHTNESS_HYSTERESIS;
         
-        if (adc_average >= upper_limit) {
+        if ((int)adc_average >= upper_limit) {
             display_brightness = (display_brightness + 1) % NUMBER_OF_BRIGHTNESS_SETTINGS;
-        } else if (adc_average <= lower_limit) {
+        } else if ((int)adc_average <= lower_limit) {
             display_brightness = (display_brightness + NUMBER_OF_BRIGHTNESS_SETTINGS - 1) % NUMBER_OF_BRIGHTNESS_SETTINGS;
         }
         
-        ESP_LOGI(TAG, "ADC value %d Brightness %d", adc_average, display_brightness);
+        // Print ADC reading
+        //ESP_LOGI(TAG_ADC, "ADC value %d Brightness %d", adc_average, display_brightness);
+    }
+}
+
+/* Reset the microcontroller if the prices have not been received within
+ * a certain timeframe to ensure that the display never gets stuck
+ * if the API is down or the WiFi access point is temporarily switched off,
+ * causing ESP_MAXIMUM_RETRY to be exceeded and the connection procedure to give up.
+ */
+void fetcher_watchdog_task(void * pvParameters)
+{
+    uint32_t secondsCounter = 0;
+    while(1)
+    {
+        // Non-blocking one-second delay
+        vTaskDelay(1000 / portTICK_RATE_MS);
+        // Check if any enabled unit rates haven't been obtained for any reason
+        if
+        (
+            (!got_gas_unit_rate) ||
+            (!got_elec_unit_rate) ||
+            ((!got_gas_flex_unit_rate) && CONFIG_ESP_TARIFF_FLEX_ENABLE) ||
+            ((!got_elec_flex_unit_rate) && CONFIG_ESP_TARIFF_FLEX_ENABLE) ||
+            ((!got_elec_agile_unit_rate) && CONFIG_ESP_TARIFF_AGILE_ENABLE)
+        )
+        {
+            // Increment seconds counter and restart if limit is exceeded
+            secondsCounter++;
+            ESP_LOGI(TAG_FW, "Watchdog increment %d", secondsCounter);
+            ESP_LOGI(TAG_FW, "Got unit rate flags %d %d %d %d %d", got_gas_unit_rate, got_elec_unit_rate, got_gas_flex_unit_rate, got_elec_flex_unit_rate, got_elec_agile_unit_rate);
+            if (secondsCounter > FETCHER_WDOG_LIMIT_IN_SECONDS)
+            {
+                ESP_LOGI(TAG_FW, "Fetcher Watchdog reset");
+                esp_restart();
+            }
+        }
+        else
+        {
+            // Reset seconds counter if all expected unit rates have been obtained
+            secondsCounter = 0;
+        }
     }
 }
 
 // Main function - execution starts here
 void app_main()
 {
+    ESP_LOGI("Reset reason: ", "%d", esp_reset_reason());
 	//Initialize NVS
 	esp_err_t ret = nvs_flash_init();
 	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -1255,13 +1456,16 @@ void app_main()
     TaskHandle_t getUnitRatesHandle;
     TaskHandle_t displayHandle;
     TaskHandle_t getLightLevelHandle;
+    TaskHandle_t fetcherWatchdogHandle;
     
-    xTaskCreatePinnedToCore(get_unit_rates_task, "get_unit_rates_task", 4096, NULL, configMAX_PRIORITIES - 3, &getUnitRatesHandle, 1);
+    xTaskCreatePinnedToCore(get_unit_rates_task, "get_unit_rates_task", 8192, NULL, configMAX_PRIORITIES - 3, &getUnitRatesHandle, 1);
     
     // Uncomment this task and comment out display_task below to test display with different values
     //xTaskCreatePinnedToCore(test_task, "test_task", 4096, NULL, configMAX_PRIORITIES - 3, &getUnitRatesHandle, 1);
     
-    xTaskCreatePinnedToCore(display_task, "display_task", 4096, NULL, configMAX_PRIORITIES - 2, &displayHandle, 1);
+    xTaskCreatePinnedToCore(display_task, "display_task", 2048, NULL, configMAX_PRIORITIES - 2, &displayHandle, 1);
+    
+    xTaskCreatePinnedToCore(fetcher_watchdog_task, "fetcher_watchdog_task", 4096, NULL, configMAX_PRIORITIES - 1, &fetcherWatchdogHandle, 1);
     
     xTaskCreatePinnedToCore(get_light_level_task, "get_light_level_task", 4096, NULL, configMAX_PRIORITIES - 4, &getLightLevelHandle, 1);
 
