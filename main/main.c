@@ -459,6 +459,23 @@ esp_err_t http_client_content_get(char * url, char * response_buffer)
 	return err;
 }
 
+// Convert a date string into a struct tm
+void date_string_to_struct_tm(const char *s, struct tm *time_struct)
+{
+     sscanf(
+        s,
+        "%d-%d-%dT%d-%d-%dZ",
+        &time_struct->tm_year,
+        &time_struct->tm_mon,
+        &time_struct->tm_mday,
+        &time_struct->tm_hour,
+        &time_struct->tm_min,
+        &time_struct->tm_sec
+    );
+    time_struct->tm_year -= 1900;
+    time_struct->tm_mon--;
+}
+
 // Parse the JSON structure and return the unit rate for the specified date
 void parse_object(cJSON *root, time_t time_now, uint8_t tariff_type, double * agile_rates_ref, uint64_t * agile_validity_ref, bool * got_unit_rate_today, double * unit_rate_today, bool * got_unit_rate_tomorrow, double * unit_rate_tomorrow)
 {
@@ -468,7 +485,7 @@ void parse_object(cJSON *root, time_t time_now, uint8_t tariff_type, double * ag
     cJSON* json_date = NULL;
     cJSON* unit_rate = NULL;
     cJSON* payment_method = NULL;
-    //cJSON* expiry = NULL;
+    cJSON* expiry = NULL;
     
     // Variables for converting date and time from JSON entries
     struct tm entry_date_time_struct;
@@ -511,18 +528,7 @@ void parse_object(cJSON *root, time_t time_now, uint8_t tariff_type, double * ag
                 json_date = cJSON_GetObjectItem(subitem, "valid_from");
                 unit_rate = cJSON_GetObjectItem(subitem, "value_inc_vat");
                 // Convert json_date into struct tm
-                sscanf(
-                    json_date->valuestring,
-                    "%d-%d-%dT%d-%d-%dZ",
-                    &entry_date_time_struct.tm_year,
-                    &entry_date_time_struct.tm_mon,
-                    &entry_date_time_struct.tm_mday,
-                    &entry_date_time_struct.tm_hour,
-                    &entry_date_time_struct.tm_min,
-                    &entry_date_time_struct.tm_sec
-                );
-                entry_date_time_struct.tm_year -= 1900;
-                entry_date_time_struct.tm_mon--;
+                date_string_to_struct_tm(json_date->valuestring, &entry_date_time_struct);
                 entry_date_time = mktime(&entry_date_time_struct);
                 // Print date values
                 ESP_LOGI(TAG, "date: %s epoch: %ld unit rate: %f", json_date->valuestring, entry_date_time, unit_rate->valuedouble);
@@ -559,41 +565,30 @@ void parse_object(cJSON *root, time_t time_now, uint8_t tariff_type, double * ag
                 cJSON * subitem = cJSON_GetArrayItem(item, i);
                 json_date = cJSON_GetObjectItem(subitem, "valid_from");
                 ESP_LOGI(TAG, "valid_from: %s", json_date->valuestring);
-                /*
-                if (!cJSON_IsNull(subitem, "valid_to"))
-                {
-                    expiry = cJSON_GetObjectItem(subitem, "valid_to");
-                }
-                else
-                {
-                    expiry = cJSON_CreateNull();
-                }
                 
-                if (expiry == NULL)
-                {
-                    ESP_LOGI(TAG, "valid_to: null");
-                }
-                else
-                {
-                    ESP_LOGI(TAG, "valid_to: %s", expiry->valuestring);
-                }
-                */
+                // Get 'valid to' date string
+                expiry = cJSON_GetObjectItem(subitem, "valid_to");
+                
+                // Convert json_date into struct tm
+                date_string_to_struct_tm(json_date->valuestring, &entry_date_time_struct);
+                entry_date_time = mktime(&entry_date_time_struct);
+                
                 unit_rate = cJSON_GetObjectItem(subitem, "value_inc_vat");
-                ESP_LOGI(TAG, "unit rate: %f", unit_rate->valuedouble);
                 payment_method = cJSON_GetObjectItem(subitem, "payment_method");
-                ESP_LOGI(TAG, "payment method: %s", payment_method->valuestring);
-                //if (expiry == NULL)
-                //{
-                    ESP_LOGI(TAG, "from: %s unit rate: %f payment method: %s", json_date->valuestring, unit_rate->valuedouble, payment_method->valuestring);
-                //}
-                //else
-                //{
-                //    ESP_LOGI(TAG, "from: %s to: %s unit rate: %f payment method: %s", json_date->valuestring, expiry->valuestring, unit_rate->valuedouble, payment_method->valuestring);
-                //}
+                if (cJSON_IsNull(expiry))
+                {
+                    ESP_LOGI(TAG, "from: %s to: null unit rate: %f payment method: %s", json_date->valuestring, unit_rate->valuedouble, payment_method->valuestring);
+                }
+                else
+                {
+                   ESP_LOGI(TAG, "from: %s to: %s unit rate: %f payment method: %s", json_date->valuestring, expiry->valuestring, unit_rate->valuedouble, payment_method->valuestring);
+                }
                 
-                // Check if the current array entry matches the specified date
-                // Just going to assume that the first entry in the list is always the current one
-                if (strcmp(payment_method->valuestring, "DIRECT_DEBIT") == 0)
+                // Check if the current array entry is in the valid date range.
+                // Convert 'valid from' date to epoch and compare with now.
+                // Just going to assume that the newest entry is always first, then
+                // no need to also test the expiry date
+                if (time_now >= entry_date_time && strcmp(payment_method->valuestring, "DIRECT_DEBIT") == 0)
                 {
                     price = unit_rate->valuedouble;
                     // Check for null pointer then set
@@ -619,9 +614,7 @@ void parse_object(cJSON *root, time_t time_now, uint8_t tariff_type, double * ag
             {
                 cJSON * subitem = cJSON_GetArrayItem(item, i);
                 json_date = cJSON_GetObjectItem(subitem, "valid_from");
-                ESP_LOGI(TAG, "valid_from: %s", json_date->valuestring);
                 unit_rate = cJSON_GetObjectItem(subitem, "value_inc_vat");
-                ESP_LOGI(TAG, "unit rate: %f", unit_rate->valuedouble);
                 ESP_LOGI(TAG, "from: %s unit rate: %f", json_date->valuestring, unit_rate->valuedouble);
                 
                 // Parse the valid-from string (json_date->valuestring)
