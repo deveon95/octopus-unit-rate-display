@@ -1101,6 +1101,7 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
     // If first digit is about to be displayed, update display data
     if ((current_disp_index == 0) && (dim_cycle_counter == 0))
     {
+        decimal_points = 0;
         // Right hand displays
         if (display_agile)
         {
@@ -1109,14 +1110,12 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
             display_digits[1] = 10;
             display_digits[2] = 10;
             
-            decimal_points &= 0b1111111111111111111000;
             
             if (timeSet && wifi_connected && got_elec_agile_unit_rate && ((elec_agile_validity >> agile_time) & 1))
             {
                 // Electricity
                 get_display_digits(elec_agile_rates[agile_time], &display_digits[3], &dp_temp);
                 
-                decimal_points &= 0b1111111111111111000111;
                 decimal_points |= dp_temp << 3;
             }
             else
@@ -1136,7 +1135,6 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
                 // Gas
                 get_display_digits(gas_tomorrow_unit_rate, &display_digits[0], &dp_temp);
                 
-                decimal_points &= 0b111000;
                 decimal_points |= dp_temp;
             }
             else
@@ -1152,7 +1150,6 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
                 // Electricity
                 get_display_digits(elec_tomorrow_unit_rate, &display_digits[3], &dp_temp);
                 
-                decimal_points &= 0b000111;
                 decimal_points |= dp_temp << 3;
             }
             else
@@ -1173,7 +1170,6 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
                 // Gas
                 get_display_digits(gas_flex_unit_rate, &display_digits[16], &dp_temp);
                 
-                decimal_points &= 0b1110001111111111111111;
                 decimal_points |= dp_temp << 16;
             }
             else
@@ -1189,7 +1185,6 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
                 // Electricity
                 get_display_digits(elec_flex_unit_rate, &display_digits[19], &dp_temp);
                 
-                decimal_points &= 0b0001111111111111111111;
                 decimal_points |= dp_temp << 19;
             }
             else
@@ -1208,7 +1203,6 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
                 // Gas
                 get_display_digits(gas_unit_rate, &display_digits[16], &dp_temp);
                 
-                decimal_points &= 0b1110001111111111111111;
                 decimal_points |= dp_temp << 16;
             }
             else
@@ -1224,7 +1218,6 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
                 // Electricity
                 get_display_digits(elec_unit_rate, &display_digits[19], &dp_temp);
                 
-                decimal_points &= 0b0001111111111111111111;
                 decimal_points |= dp_temp << 19;
             }
             else
