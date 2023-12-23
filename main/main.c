@@ -91,15 +91,20 @@ bool wifi_connected = false;
 // Need to change this to separate ones for gas and elec
 bool got_gas_unit_rate = false;
 bool got_elec_unit_rate = false;
+bool got_gas_tomorrow_unit_rate = false;
+bool got_elec_tomorrow_unit_rate = false;
 bool got_gas_flex_unit_rate = false;
 bool got_elec_flex_unit_rate = false;
 bool got_elec_agile_unit_rate = false;
 #define TARIFF_TYPE_TRACKER 0
 #define TARIFF_TYPE_FLEXIBLE 1
 #define TARIFF_TYPE_AGILE 2
+#define TARIFF_TYPE_TRACKER_TOMORROW 3
 
 double gas_unit_rate = 0.0;
 double elec_unit_rate = 0.0;
+double gas_tomorrow_unit_rate = 0.0;
+double elec_tomorrow_unit_rate = 0.0;
 double gas_flex_unit_rate = 0.0;
 double elec_flex_unit_rate = 0.0;
 double elec_agile_rates[48];
@@ -455,16 +460,40 @@ esp_err_t http_client_content_get(char * url, char * response_buffer)
 }
 
 // Parse the JSON structure and return the unit rate for the specified date
-double parse_object(cJSON *root, char * date, uint8_t tariff_type, double * agile_rates_ref, uint64_t * agile_validity_ref)
+void parse_object(cJSON *root, time_t time_now, uint8_t tariff_type, double * agile_rates_ref, uint64_t * agile_validity_ref, bool * got_unit_rate_today, double * unit_rate_today, bool * got_unit_rate_tomorrow, double * unit_rate_tomorrow)
 {
     double price = 0.0;
+    double price_tomorrow = 0.0;
     uint8_t agile_hour = 0;
-    cJSON* name = NULL;
+    cJSON* json_date = NULL;
     cJSON* unit_rate = NULL;
     cJSON* payment_method = NULL;
-    cJSON* expiry = NULL;
+    //cJSON* expiry = NULL;
+    
+    // Variables for converting date and time from JSON entries
+    struct tm entry_date_time_struct;
+    time_t entry_date_time = 0;
+    // Initialise entry_date_time_struct (very important)
+    gmtime_r(&entry_date_time, &entry_date_time_struct);
     
     int i;
+    // Convert time_now into a date string
+    char time_string[11];
+    struct tm time_now_struct;
+    // Generate data for time_now_struct from time_now
+    gmtime_r(&time_now, &time_now_struct);
+    // Generate string for current date from time_now_struct
+    strftime(time_string, (sizeof(time_string) / sizeof(char)), "%Y-%m-%d", &time_now_struct);
+    // Calculate tomorrow's date too
+    time_t time_tomorrow = time_now + 86400;
+    // Convert time_tomorrow into a date string
+    char time_tomorrow_string[11];
+    struct tm time_tomorrow_struct;
+    // Generate data for time_tomorrow_struct from time_tomorrow
+    gmtime_r(&time_tomorrow, &time_tomorrow_struct);
+    // Generate string for tomorrow#s date from time_tomorrow_struct
+    strftime(time_tomorrow_string, (sizeof(time_tomorrow_string) / sizeof(char)), "%Y-%m-%d", &time_tomorrow_struct);
+    ESP_LOGI(TAG, "date now: %s epoch: %ld", time_string, time_now);
     
     if (tariff_type == TARIFF_TYPE_TRACKER)
     {
@@ -479,13 +508,38 @@ double parse_object(cJSON *root, char * date, uint8_t tariff_type, double * agil
             for (i = 0 ; i < cJSON_GetArraySize(item) ; i++)
             {
                 cJSON * subitem = cJSON_GetArrayItem(item, i);
-                name = cJSON_GetObjectItem(subitem, "valid_from");
+                json_date = cJSON_GetObjectItem(subitem, "valid_from");
                 unit_rate = cJSON_GetObjectItem(subitem, "value_inc_vat");
-                ESP_LOGI(TAG, "date: %s unit rate: %f", name->valuestring, unit_rate->valuedouble);
+                // Convert json_date into struct tm
+                sscanf(
+                    json_date->valuestring,
+                    "%d-%d-%dT%d-%d-%dZ",
+                    &entry_date_time_struct.tm_year,
+                    &entry_date_time_struct.tm_mon,
+                    &entry_date_time_struct.tm_mday,
+                    &entry_date_time_struct.tm_hour,
+                    &entry_date_time_struct.tm_min,
+                    &entry_date_time_struct.tm_sec
+                );
+                entry_date_time_struct.tm_year -= 1900;
+                entry_date_time_struct.tm_mon--;
+                entry_date_time = mktime(&entry_date_time_struct);
+                // Print date values
+                ESP_LOGI(TAG, "date: %s epoch: %ld unit rate: %f", json_date->valuestring, entry_date_time, unit_rate->valuedouble);
                 // Check if the current array entry matches the specified date
-                if (strncmp(name->valuestring, date, 10) == 0)
+                if ((entry_date_time > (time_now - (time_t)86400)) && (entry_date_time <= time_now))
                 {
-                    price = unit_rate->valuedouble;
+                    price = unit_rate->valuedouble;                        
+                    // Check for null pointer then set
+                    if (got_unit_rate_today)
+                        *got_unit_rate_today = true;
+                }
+                else if ((entry_date_time > time_now) && (entry_date_time <= (time_now + (time_t)86400)))
+                {
+                    price_tomorrow = unit_rate->valuedouble;
+                    // Check for null pointer then set
+                    if (got_unit_rate_tomorrow)
+                        *got_unit_rate_tomorrow = true;
                 }
             }
         }
@@ -503,8 +557,8 @@ double parse_object(cJSON *root, char * date, uint8_t tariff_type, double * agil
             for (i = 0 ; i < cJSON_GetArraySize(item) ; i++)
             {
                 cJSON * subitem = cJSON_GetArrayItem(item, i);
-                name = cJSON_GetObjectItem(subitem, "valid_from");
-                ESP_LOGI(TAG, "valid_from: %s", name->valuestring);
+                json_date = cJSON_GetObjectItem(subitem, "valid_from");
+                ESP_LOGI(TAG, "valid_from: %s", json_date->valuestring);
                 /*
                 if (!cJSON_IsNull(subitem, "valid_to"))
                 {
@@ -530,11 +584,11 @@ double parse_object(cJSON *root, char * date, uint8_t tariff_type, double * agil
                 ESP_LOGI(TAG, "payment method: %s", payment_method->valuestring);
                 //if (expiry == NULL)
                 //{
-                    ESP_LOGI(TAG, "from: %s unit rate: %f payment method: %s", name->valuestring, unit_rate->valuedouble, payment_method->valuestring);
+                    ESP_LOGI(TAG, "from: %s unit rate: %f payment method: %s", json_date->valuestring, unit_rate->valuedouble, payment_method->valuestring);
                 //}
                 //else
                 //{
-                //    ESP_LOGI(TAG, "from: %s to: %s unit rate: %f payment method: %s", name->valuestring, expiry->valuestring, unit_rate->valuedouble, payment_method->valuestring);
+                //    ESP_LOGI(TAG, "from: %s to: %s unit rate: %f payment method: %s", json_date->valuestring, expiry->valuestring, unit_rate->valuedouble, payment_method->valuestring);
                 //}
                 
                 // Check if the current array entry matches the specified date
@@ -542,6 +596,9 @@ double parse_object(cJSON *root, char * date, uint8_t tariff_type, double * agil
                 if (strcmp(payment_method->valuestring, "DIRECT_DEBIT") == 0)
                 {
                     price = unit_rate->valuedouble;
+                    // Check for null pointer then set
+                    if (got_unit_rate_today)
+                        *got_unit_rate_today = true;
                     break;
                 }
             }
@@ -561,21 +618,21 @@ double parse_object(cJSON *root, char * date, uint8_t tariff_type, double * agil
             for (i = 0 ; i < cJSON_GetArraySize(item) ; i++)
             {
                 cJSON * subitem = cJSON_GetArrayItem(item, i);
-                name = cJSON_GetObjectItem(subitem, "valid_from");
-                ESP_LOGI(TAG, "valid_from: %s", name->valuestring);
+                json_date = cJSON_GetObjectItem(subitem, "valid_from");
+                ESP_LOGI(TAG, "valid_from: %s", json_date->valuestring);
                 unit_rate = cJSON_GetObjectItem(subitem, "value_inc_vat");
                 ESP_LOGI(TAG, "unit rate: %f", unit_rate->valuedouble);
-                ESP_LOGI(TAG, "from: %s unit rate: %f", name->valuestring, unit_rate->valuedouble);
+                ESP_LOGI(TAG, "from: %s unit rate: %f", json_date->valuestring, unit_rate->valuedouble);
                 
-                // Parse the valid-from string (name->valuestring)
+                // Parse the valid-from string (json_date->valuestring)
                 // Format is YYYY-MM-DDTHH:MM:SSZ
                 // Check that the date part matches today's date, by comparing first 10 characters
                 // with today's date string, because yesterday/tomorrow could be there as well
-                if (strncmp(name->valuestring, date, 10) == 0)
+                if (strncmp(json_date->valuestring, time_string, 10) == 0)
                 {
                     price = unit_rate->valuedouble;
                     // Get hour for current entry from valid-from string
-                    agile_hour = (name->valuestring[11] - 48 ) * 10 + (name->valuestring[12] - 48);
+                    agile_hour = (json_date->valuestring[11] - 48 ) * 10 + (json_date->valuestring[12] - 48);
                     // Put the prices into the array
                     // 00:00 agile_rates_ref[0]
                     // 00:30 agile_rates_ref[1]
@@ -583,12 +640,12 @@ double parse_object(cJSON *root, char * date, uint8_t tariff_type, double * agil
                     // and so on
                     if (agile_hour <= 23)
                     {
-                        if (name->valuestring[14] == '0')
+                        if (json_date->valuestring[14] == '0')
                         {
                             agile_rates_ref[agile_hour * 2] = price;
                             *agile_validity_ref |= ((uint64_t)1 << (agile_hour * 2));
                         }
-                        else if (name->valuestring[14] == '3')
+                        else if (json_date->valuestring[14] == '3')
                         {
                             agile_rates_ref[agile_hour * 2 + 1] = price;
                             *agile_validity_ref |= ((uint64_t)1 << (agile_hour * 2 + 1));
@@ -596,14 +653,23 @@ double parse_object(cJSON *root, char * date, uint8_t tariff_type, double * agil
                     }
                 }
             }
+            // Check for null pointer then set
+            if (got_unit_rate_today)
+                *got_unit_rate_today = true;
         }
     }
-    return price;
+    if (unit_rate_today)
+        *unit_rate_today = price;
+    if (unit_rate_tomorrow)
+        *unit_rate_tomorrow = price_tomorrow;
 }
 
-double http_client(char * url, bool * got_unit_rate, uint8_t tariff_type, double * agile_rates_ref, uint64_t * agile_validity_ref)
+void http_client(char * url, uint8_t tariff_type, double * agile_rates_ref, uint64_t * agile_validity_ref, bool * got_unit_rate, double * unit_rate, bool * got_tracker_tomorrow_rate, double * tracker_tomorrow_rate)
 {
-    double unit_rate = 0.0;
+    double unit_rate_local = 0.0;
+    bool got_unit_rate_local = 0;
+    double tracker_tomorrow_rate_local = 0.0;
+    bool got_tracker_tomorrow_rate_local = 0;
 	// Get content length from event handler
 	size_t content_length;
 	while (1) {
@@ -652,8 +718,18 @@ double http_client(char * url, bool * got_unit_rate, uint8_t tariff_type, double
         
         
         ESP_LOGI(TAG, "Attempt parse.....");
-        unit_rate = parse_object(root, time_string, tariff_type, agile_rates_ref, agile_validity_ref);
-        ESP_LOGI(TAG, "price returned: %f", unit_rate);
+        // Parse the JSON in 'root'
+        parse_object(root, time_now, tariff_type, agile_rates_ref, agile_validity_ref, &got_unit_rate_local, &unit_rate_local, &got_tracker_tomorrow_rate_local, &tracker_tomorrow_rate_local);
+        ESP_LOGI(TAG, "price returned: %f", unit_rate_local);
+        
+        if (tariff_type == TARIFF_TYPE_TRACKER)
+        {
+            ESP_LOGI(TAG, "price returned for tomorrow: %f", tracker_tomorrow_rate_local);
+            if (tracker_tomorrow_rate)
+                *tracker_tomorrow_rate = tracker_tomorrow_rate_local;
+            if (tracker_tomorrow_rate)
+                *got_tracker_tomorrow_rate = got_tracker_tomorrow_rate_local;
+        }
         
         if (tariff_type == TARIFF_TYPE_AGILE)
         {
@@ -664,14 +740,13 @@ double http_client(char * url, bool * got_unit_rate, uint8_t tariff_type, double
             ESP_LOGI(TAG, "Agile validity: %llX", *agile_validity_ref);
         }
         
-        // Check for null pointer then set
-        if (got_unit_rate)
-            *got_unit_rate = true;
-        
         cJSON_Delete(root);
         free(response_buffer);
     }
-    return unit_rate;
+    if (unit_rate)
+        *unit_rate = unit_rate_local;
+    if (got_unit_rate)
+        *got_unit_rate = got_unit_rate_local;
 }
 
 // Task for testing the display task - disable get_unit_rates_task and enable this one to test extreme values
@@ -850,7 +925,7 @@ void get_unit_rates_task(void * pvParameters)
             sprintf(url, "https://api.octopus.energy/v1/products/%s/electricity-tariffs/%s/standard-unit-rates/", CONFIG_ESP_TARIFF, CONFIG_ESP_TARIFF_ELEC);
             ESP_LOGI(TAG, "url=%s",url);
             // Do HTTP request and parse
-            elec_unit_rate = http_client(url, &got_elec_unit_rate, TARIFF_TYPE_TRACKER, NULL, NULL); 
+            http_client(url, TARIFF_TYPE_TRACKER, NULL, NULL, &got_elec_unit_rate, &elec_unit_rate, &got_elec_tomorrow_unit_rate, &elec_tomorrow_unit_rate); 
         }
         
         if (!got_gas_unit_rate)
@@ -859,7 +934,7 @@ void get_unit_rates_task(void * pvParameters)
             sprintf(url, "https://api.octopus.energy/v1/products/%s/gas-tariffs/%s/standard-unit-rates/", CONFIG_ESP_TARIFF, CONFIG_ESP_TARIFF_GAS);
             ESP_LOGI(TAG, "url=%s",url);
             // Do HTTP request and parse
-            gas_unit_rate = http_client(url, &got_gas_unit_rate, TARIFF_TYPE_TRACKER, NULL, NULL);
+            http_client(url, TARIFF_TYPE_TRACKER, NULL, NULL, &got_gas_unit_rate, &gas_unit_rate, &got_gas_tomorrow_unit_rate, &gas_tomorrow_unit_rate);
         }
         
         // Flexible tariff
@@ -876,7 +951,7 @@ void get_unit_rates_task(void * pvParameters)
                 sprintf(url, "https://api.octopus.energy/v1/products/%s/electricity-tariffs/%s/standard-unit-rates/", CONFIG_ESP_TARIFF_FLEX, CONFIG_ESP_TARIFF_ELEC_FLEX);
                 ESP_LOGI(TAG, "url=%s",url);
                 // Do HTTP request and parse
-                elec_flex_unit_rate = http_client(url, &got_elec_flex_unit_rate, TARIFF_TYPE_FLEXIBLE, NULL, NULL); 
+                http_client(url, TARIFF_TYPE_FLEXIBLE, NULL, NULL, &got_elec_flex_unit_rate, &elec_flex_unit_rate, NULL, NULL); 
             }
             
             if (!got_gas_flex_unit_rate)
@@ -885,7 +960,7 @@ void get_unit_rates_task(void * pvParameters)
                 sprintf(url, "https://api.octopus.energy/v1/products/%s/gas-tariffs/%s/standard-unit-rates/", CONFIG_ESP_TARIFF_FLEX, CONFIG_ESP_TARIFF_GAS_FLEX);
                 ESP_LOGI(TAG, "url=%s",url);
                 // Do HTTP request and parse
-                gas_flex_unit_rate = http_client(url, &got_gas_flex_unit_rate, TARIFF_TYPE_FLEXIBLE, NULL, NULL);
+                http_client(url, TARIFF_TYPE_FLEXIBLE, NULL, NULL, &got_gas_flex_unit_rate, &gas_flex_unit_rate, NULL, NULL);
             }
         }
         
@@ -899,7 +974,7 @@ void get_unit_rates_task(void * pvParameters)
             sprintf(url, "https://api.octopus.energy/v1/products/%s/electricity-tariffs/%s/standard-unit-rates/", CONFIG_ESP_TARIFF_AGILE, CONFIG_ESP_TARIFF_ELEC_AGILE);
             ESP_LOGI(TAG, "url=%s",url);
             // Do HTTP request and parse
-            http_client(url, &got_elec_agile_unit_rate, TARIFF_TYPE_AGILE,elec_agile_rates, &elec_agile_validity); 
+            http_client(url, TARIFF_TYPE_AGILE, elec_agile_rates, &elec_agile_validity, &got_elec_agile_unit_rate, NULL, NULL, NULL); 
         }
         
         
@@ -936,11 +1011,12 @@ void get_unit_rates_task(void * pvParameters)
                     got_elec_flex_unit_rate = false;
                     got_elec_agile_unit_rate = false;
                 }
-                // Tracker API doesn't always have the correct price available on time.
-                // An incorrect price is returned by the API rather than an error
-                // so all we can do is refresh it a few times overnight as it should be
-                // correct within a few hours.
-                if ((time_struct.tm_hour == 3) || (time_struct.tm_hour == 6))
+                // New API should never return incorrect prices when the new price is not
+                // yet available, but tomorrow's price for the tracker doesn't appear until
+                // some time later in the day so we need to check periodically
+                if ((time_struct.tm_hour == 1) || (time_struct.tm_hour == 6)
+                    || (time_struct.tm_hour == 10)  || (time_struct.tm_hour == 11)
+                    || (time_struct.tm_hour == 15)  || (time_struct.tm_hour == 18))
                 {
                     got_gas_unit_rate = false;
                     got_elec_unit_rate = false;
@@ -1015,79 +1091,88 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
     static uint8_t current_disp_index = 0;
     static uint8_t dim_cycle_counter = 0;
     uint32_t dp_temp;
-    bool button_held = !gpio_get_level(pin_BUTTON2);
+    bool button2_held = !gpio_get_level(pin_BUTTON2);
+    //bool button3_held = !gpio_get_level(pin_BUTTON3);
     bool display_agile = 0;
+    bool display_flex = 0;
     
     if (CONFIG_ESP_TARIFF_AGILE_ENABLE)
     {
-        display_agile = !button_held;
+        display_agile = button2_held;
+    }
+    if (CONFIG_ESP_TARIFF_FLEX_ENABLE)
+    {
+        display_flex = button2_held;
     }
     
     // If first digit is about to be displayed, update display data
     if ((current_disp_index == 0) && (dim_cycle_counter == 0))
     {
         // Right hand displays
-        if (timeSet && wifi_connected && got_gas_unit_rate)
-        {
-            // Generate numeric digits
-            // Gas
-            get_display_digits(gas_unit_rate, &display_digits[0], &dp_temp);
-            
-            decimal_points &= 0b111000;
-            decimal_points |= dp_temp;
-        }
-        else
-        {
-            // generate dashes pattern
-            display_digits[0] = wifi_connected ? 0xB : 0xA;
-            display_digits[1] = timeSet ? 0xB : 0xA;
-            display_digits[2] = got_gas_unit_rate ? 0xB : 0xA;
-        }
-        
-        if (timeSet && wifi_connected && got_elec_unit_rate)
-        {
-            // Electricity
-            get_display_digits(elec_unit_rate, &display_digits[3], &dp_temp);
-            
-            decimal_points &= 0b000111;
-            decimal_points |= dp_temp << 3;
-        }
-        else
-        {
-            // generate dashes pattern
-            display_digits[3] = wifi_connected ? 0xB : 0xA;
-            display_digits[4] = timeSet ? 0xB : 0xA;
-            display_digits[5] = got_elec_unit_rate ? 0xB : 0xA;
-        }
-        
-        // Left hand display
         if (display_agile)
         {
             // Gas - not applicable to agile
-            display_digits[16] = 10;
-            display_digits[17] = 10;
-            display_digits[18] = 10;
+            display_digits[0] = 10;
+            display_digits[1] = 10;
+            display_digits[2] = 10;
             
-            decimal_points &= 0b1110001111111111111111;
+            decimal_points &= 0b1111111111111111111000;
             
             if (timeSet && wifi_connected && got_elec_agile_unit_rate && ((elec_agile_validity >> agile_time) & 1))
             {
                 // Electricity
-                get_display_digits(elec_agile_rates[agile_time], &display_digits[19], &dp_temp);
+                get_display_digits(elec_agile_rates[agile_time], &display_digits[3], &dp_temp);
                 
-                decimal_points &= 0b0001111111111111111111;
-                decimal_points |= dp_temp << 19;
+                decimal_points &= 0b1111111111111111000111;
+                decimal_points |= dp_temp << 3;
             }
             else
             {
                 // generate dashes pattern
-                display_digits[19] = wifi_connected ? 0xB : 0xA;
-                display_digits[20] = timeSet ? 0xB : 0xA;
-                display_digits[21] = got_elec_agile_unit_rate ? 0xB : 0xA;
+                display_digits[3] = wifi_connected ? 0xB : 0xA;
+                display_digits[4] = timeSet ? 0xB : 0xA;
+                display_digits[5] = got_elec_agile_unit_rate ? 0xB : 0xA;
             }
 
         }
-        else
+        else 
+        {
+            if (timeSet && wifi_connected && got_gas_tomorrow_unit_rate)
+            {
+                // Generate numeric digits
+                // Gas
+                get_display_digits(gas_tomorrow_unit_rate, &display_digits[0], &dp_temp);
+                
+                decimal_points &= 0b111000;
+                decimal_points |= dp_temp;
+            }
+            else
+            {
+                // generate dashes pattern
+                display_digits[0] = wifi_connected ? 0xB : 0xA;
+                display_digits[1] = timeSet ? 0xB : 0xA;
+                display_digits[2] = got_gas_tomorrow_unit_rate ? 0xB : 0xA;
+            }
+            
+            if (timeSet && wifi_connected && got_elec_tomorrow_unit_rate)
+            {
+                // Electricity
+                get_display_digits(elec_tomorrow_unit_rate, &display_digits[3], &dp_temp);
+                
+                decimal_points &= 0b000111;
+                decimal_points |= dp_temp << 3;
+            }
+            else
+            {
+                // generate dashes pattern
+                display_digits[3] = wifi_connected ? 0xB : 0xA;
+                display_digits[4] = timeSet ? 0xB : 0xA;
+                display_digits[5] = got_elec_tomorrow_unit_rate ? 0xB : 0xA;
+            }
+        }
+        
+        // Left hand display
+        if (display_flex)
         {
             if (timeSet && wifi_connected && got_gas_flex_unit_rate)
             {
@@ -1120,6 +1205,41 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
                 display_digits[19] = wifi_connected ? 0xB : 0xA;
                 display_digits[20] = timeSet ? 0xB : 0xA;
                 display_digits[21] = got_elec_flex_unit_rate ? 0xB : 0xA;
+            }
+        }
+        else
+        {
+            if (timeSet && wifi_connected && got_gas_unit_rate)
+            {
+                // Generate numeric digits
+                // Gas
+                get_display_digits(gas_unit_rate, &display_digits[16], &dp_temp);
+                
+                decimal_points &= 0b1110001111111111111111;
+                decimal_points |= dp_temp << 16;
+            }
+            else
+            {
+                // generate dashes pattern
+                display_digits[16] = wifi_connected ? 0xB : 0xA;
+                display_digits[17] = timeSet ? 0xB : 0xA;
+                display_digits[18] = got_gas_unit_rate ? 0xB : 0xA;
+            }
+            
+            if (timeSet && wifi_connected && got_elec_unit_rate)
+            {
+                // Electricity
+                get_display_digits(elec_unit_rate, &display_digits[19], &dp_temp);
+                
+                decimal_points &= 0b0001111111111111111111;
+                decimal_points |= dp_temp << 19;
+            }
+            else
+            {
+                // generate dashes pattern
+                display_digits[19] = wifi_connected ? 0xB : 0xA;
+                display_digits[20] = timeSet ? 0xB : 0xA;
+                display_digits[21] = got_elec_unit_rate ? 0xB : 0xA;
             }
         }
         
