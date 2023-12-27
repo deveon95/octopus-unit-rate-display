@@ -992,7 +992,7 @@ void get_unit_rates_task(void * pvParameters)
             agile_time = (time_struct.tm_hour * 2) + (time_struct.tm_min / 30);
             if (time_struct.tm_hour != hour_last)
             {
-                // Move the got_x_rate statements here to refresh prices hourly instead
+                // Move the got_x_rate statements here to always refresh prices hourly instead.
                 
                 ESP_LOGI(TAG, "time_struct.tm_hour %d differs from hour_last %d", time_struct.tm_hour, hour_last);
                 // Check for change in current day and update prices daily
@@ -1006,13 +1006,17 @@ void get_unit_rates_task(void * pvParameters)
                 }
                 // New API should never return incorrect prices when the new price is not
                 // yet available, but tomorrow's price for the tracker doesn't appear until
-                // some time later in the day so we need to check periodically
-                if ((time_struct.tm_hour == 1) || (time_struct.tm_hour == 6)
-                    || (time_struct.tm_hour == 10)  || (time_struct.tm_hour == 11)
-                    || (time_struct.tm_hour == 15)  || (time_struct.tm_hour == 18))
+                // some time later in the day so we need to check hourly until those appear.
+                if ((got_gas_tomorrow_unit_rate == false) || (got_elec_tomorrow_unit_rate == false))
                 {
                     got_gas_unit_rate = false;
                     got_elec_unit_rate = false;
+                }
+                // The agile prices for the last hour of the day are not always available
+                // so refresh the prices if the agile prices for the new hour are not valid
+                if (((elec_agile_validity >> (time_struct.tm_hour * 2)) & 0b11) != 0b11)
+                {
+                    got_elec_agile_unit_rate = false;
                 }
                 break;
             }
@@ -1461,7 +1465,8 @@ void fetcher_watchdog_task(void * pvParameters)
     {
         // Non-blocking one-second delay
         vTaskDelay(1000 / portTICK_RATE_MS);
-        // Check if any enabled unit rates haven't been obtained for any reason
+        // Check if any enabled unit rates haven't been obtained for any reason.
+        // Tomorrow's rates don't need to be checked here as they are checked hourly elsewhere.
         if
         (
             (!got_gas_unit_rate) ||
