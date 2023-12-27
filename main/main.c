@@ -1146,7 +1146,7 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
                 // generate dashes pattern
                 display_digits[0] = wifi_connected ? 0xB : 0xA;
                 display_digits[1] = timeSet ? 0xB : 0xA;
-                display_digits[2] = got_gas_tomorrow_unit_rate ? 0xB : 0xA;
+                display_digits[2] = got_gas_unit_rate ? 0xB : 0xA;
             }
             
             if (timeSet && wifi_connected && got_elec_tomorrow_unit_rate)
@@ -1161,7 +1161,7 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
                 // generate dashes pattern
                 display_digits[3] = wifi_connected ? 0xB : 0xA;
                 display_digits[4] = timeSet ? 0xB : 0xA;
-                display_digits[5] = got_elec_tomorrow_unit_rate ? 0xB : 0xA;
+                display_digits[5] = got_elec_unit_rate ? 0xB : 0xA;
             }
         }
         
