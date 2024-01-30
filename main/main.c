@@ -1093,13 +1093,21 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
     bool display_agile = 0;
     bool display_flex = 0;
     
-    if (CONFIG_ESP_TARIFF_AGILE_ENABLE)
+    if (CONFIG_ESP_TARIFF_TOMORROW_ENABLE == 0 && CONFIG_ESP_TARIFF_FLEX_ENABLE)
     {
-        display_agile = button2_held;
+        display_flex = 1;
     }
-    if (CONFIG_ESP_TARIFF_FLEX_ENABLE)
+    else if (CONFIG_ESP_TARIFF_FLEX_ENABLE)
     {
         display_flex = button2_held;
+    }
+    if (CONFIG_ESP_TARIFF_TOMORROW_ENABLE == 0 && CONFIG_ESP_TARIFF_AGILE_ENABLE)
+    {
+        display_agile = 1;
+    }
+    else if (CONFIG_ESP_TARIFF_AGILE_ENABLE)
+    {
+        display_agile = button2_held;
     }
     
     // If first digit is about to be displayed, update display data
@@ -1131,7 +1139,40 @@ static bool IRAM_ATTR timer_group_isr_callback(void *args)
             }
 
         }
-        else 
+        else if (CONFIG_ESP_TARIFF_TOMORROW_ENABLE == 0)
+        {
+            if (timeSet && wifi_connected && got_gas_unit_rate)
+            {
+                // Generate numeric digits
+                // Gas
+                get_display_digits(gas_unit_rate, &display_digits[0], &dp_temp);
+                
+                decimal_points |= dp_temp;
+            }
+            else
+            {
+                // generate dashes pattern
+                display_digits[0] = wifi_connected ? 0xB : 0xA;
+                display_digits[1] = timeSet ? 0xB : 0xA;
+                display_digits[2] = got_gas_unit_rate ? 0xB : 0xA;
+            }
+            
+            if (timeSet && wifi_connected && got_elec_unit_rate)
+            {
+                // Electricity
+                get_display_digits(elec_unit_rate, &display_digits[3], &dp_temp);
+                
+                decimal_points |= dp_temp << 3;
+            }
+            else
+            {
+                // generate dashes pattern
+                display_digits[3] = wifi_connected ? 0xB : 0xA;
+                display_digits[4] = timeSet ? 0xB : 0xA;
+                display_digits[5] = got_elec_unit_rate ? 0xB : 0xA;
+            }
+        }
+        else
         {
             if (timeSet && wifi_connected && got_gas_tomorrow_unit_rate)
             {
