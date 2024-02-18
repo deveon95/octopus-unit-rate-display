@@ -32,6 +32,7 @@
 #include "nvs_flash.h"
 #include "time.h"
 #include "driver/gpio.h"
+#include "hal/gpio_ll.h"
 #include "driver/timer.h"
 #include "driver/adc.h"
 
@@ -74,7 +75,7 @@
 #define pin_BUTTON4 3
 
 #define TIMER_DIVIDER         (16)  //  Hardware timer clock divider
-#define TIMER_SCALE           ((TIMER_BASE_CLK / 10000)/ TIMER_DIVIDER)  // convert counter value to seconds
+#define TIMER_SCALE           ((ets_get_apb_freq() / 10000)/ TIMER_DIVIDER)  // convert counter value to seconds
 
 typedef struct {
     int timer_group;
@@ -186,7 +187,7 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
                 if (timeval_struct.tv_sec > 0)
                 {
                     timeSet = true;
-                    ESP_LOGI(TAG, "RTC Seconds Since Epoch: %ld", timeval_struct.tv_sec);
+                    ESP_LOGI(TAG, "RTC Seconds Since Epoch: %lld", timeval_struct.tv_sec);
                     ESP_LOGI(TAG, "RTC set, returned: %d", settimeofday(&timeval_struct, NULL));
                 }
             }
@@ -510,7 +511,7 @@ void parse_object(cJSON *root, time_t time_now, uint8_t tariff_type, double * ag
     gmtime_r(&time_tomorrow, &time_tomorrow_struct);
     // Generate string for tomorrow#s date from time_tomorrow_struct
     strftime(time_tomorrow_string, (sizeof(time_tomorrow_string) / sizeof(char)), "%Y-%m-%d", &time_tomorrow_struct);
-    ESP_LOGI(TAG, "date now: %s epoch: %ld", time_string, time_now);
+    ESP_LOGI(TAG, "date now: %s epoch: %lld", time_string, time_now);
     
     if (tariff_type == TARIFF_TYPE_TRACKER)
     {
@@ -531,7 +532,7 @@ void parse_object(cJSON *root, time_t time_now, uint8_t tariff_type, double * ag
                 date_string_to_struct_tm(json_date->valuestring, &entry_date_time_struct);
                 entry_date_time = mktime(&entry_date_time_struct);
                 // Print date values
-                ESP_LOGI(TAG, "date: %s epoch: %ld unit rate: %f", json_date->valuestring, entry_date_time, unit_rate->valuedouble);
+                ESP_LOGI(TAG, "date: %s epoch: %lld unit rate: %f", json_date->valuestring, entry_date_time, unit_rate->valuedouble);
                 // Check if the current array entry matches the specified date
                 if ((entry_date_time > (time_now - (time_t)86400)) && (entry_date_time <= time_now))
                 {
@@ -746,28 +747,28 @@ void http_client(char * url, uint8_t tariff_type, double * agile_rates_ref, uint
 void test_task(void * pvParameters)
 {
     ESP_LOGI(TAG, "Test task started");
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     ESP_LOGI(TAG, "Test task: Wifi connected");
     wifi_connected = true;
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     ESP_LOGI(TAG, "Test task: Time set");
     timeSet = true;
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     gas_unit_rate = 2.73;
     got_gas_unit_rate = true;
     ESP_LOGI(TAG, "Test task: Gas unit rate set %f", gas_unit_rate);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     elec_unit_rate = 16.5;
     got_elec_unit_rate = true;
     ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     ESP_LOGI(TAG, "Test task: Unit rates unset");
     got_gas_unit_rate = true;
     got_elec_unit_rate = true;
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     gas_unit_rate = 0.0;
     got_gas_unit_rate = true;
@@ -776,7 +777,7 @@ void test_task(void * pvParameters)
     elec_unit_rate = -10000.1;
     got_elec_unit_rate = true;
     ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     gas_unit_rate = 0.1;
     got_gas_unit_rate = true;
@@ -785,7 +786,7 @@ void test_task(void * pvParameters)
     elec_unit_rate = -10000.0;
     got_elec_unit_rate = true;
     ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     gas_unit_rate = 9.9;
     got_gas_unit_rate = true;
@@ -794,7 +795,7 @@ void test_task(void * pvParameters)
     elec_unit_rate = -9999.9;
     got_elec_unit_rate = true;
     ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     gas_unit_rate = 10.0;
     got_gas_unit_rate = true;
@@ -803,7 +804,7 @@ void test_task(void * pvParameters)
     elec_unit_rate = -1000.1;
     got_elec_unit_rate = true;
     ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     gas_unit_rate = 10.1;
     got_gas_unit_rate = true;
@@ -812,7 +813,7 @@ void test_task(void * pvParameters)
     elec_unit_rate = -1000.0;
     got_elec_unit_rate = true;
     ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     gas_unit_rate = 99.9;
     got_gas_unit_rate = true;
@@ -821,7 +822,7 @@ void test_task(void * pvParameters)
     elec_unit_rate = -999.9;
     got_elec_unit_rate = true;
     ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     gas_unit_rate = 100.0;
     got_gas_unit_rate = true;
@@ -830,7 +831,7 @@ void test_task(void * pvParameters)
     elec_unit_rate = -100.1;
     got_elec_unit_rate = true;
     ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     gas_unit_rate = 100.1;
     got_gas_unit_rate = true;
@@ -839,7 +840,7 @@ void test_task(void * pvParameters)
     elec_unit_rate = -100.0;
     got_elec_unit_rate = true;
     ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     gas_unit_rate = 999.9;
     got_gas_unit_rate = true;
@@ -848,7 +849,7 @@ void test_task(void * pvParameters)
     elec_unit_rate = -99.9;
     got_elec_unit_rate = true;
     ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     gas_unit_rate = 1000.0;
     got_gas_unit_rate = true;
@@ -857,7 +858,7 @@ void test_task(void * pvParameters)
     elec_unit_rate = -10.1;
     got_elec_unit_rate = true;
     ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     gas_unit_rate = 1000.1;
     got_gas_unit_rate = true;
@@ -866,7 +867,7 @@ void test_task(void * pvParameters)
     elec_unit_rate = -10;
     got_elec_unit_rate = true;
     ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     gas_unit_rate = 9999.9;
     got_gas_unit_rate = true;
@@ -875,7 +876,7 @@ void test_task(void * pvParameters)
     elec_unit_rate = -9.9;
     got_elec_unit_rate = true;
     ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     
     gas_unit_rate = 10000.0;
     got_gas_unit_rate = true;
@@ -884,7 +885,7 @@ void test_task(void * pvParameters)
     elec_unit_rate = -0.1;
     got_elec_unit_rate = true;
     ESP_LOGI(TAG, "Test task: Elec unit rate set %f", elec_unit_rate);
-    vTaskDelay(2000 / portTICK_RATE_MS);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
 }
 
 // Task for connecting to wifi and getting unit rates
@@ -983,7 +984,7 @@ void get_unit_rates_task(void * pvParameters)
     
         while(1)
         {
-            vTaskDelay(10000 / portTICK_RATE_MS);
+            vTaskDelay(10000 / portTICK_PERIOD_MS);
             // Check for change in current hour and repeat http_client in that case
             // Check every hour even though rates should only change once a day because
             // sometimes the day's rates are not available until several hours into the day.
@@ -1426,7 +1427,7 @@ void display_task(void * pvParameters)
     
     while(1)
     {
-        vTaskDelay(10000 / portTICK_RATE_MS);
+        vTaskDelay(10000 / portTICK_PERIOD_MS);
     }
 }
 
@@ -1445,7 +1446,7 @@ void get_light_level_task(void * pvParameters)
     while(1)
     {
         // 50ms sampling interval
-        vTaskDelay(50 / portTICK_RATE_MS);
+        vTaskDelay(50 / portTICK_PERIOD_MS);
         
         // Move entries in the filter along
         for (uint8_t i = 0; i < ADC_FILTER_LENGTH - 1; i++)
@@ -1505,7 +1506,7 @@ void fetcher_watchdog_task(void * pvParameters)
     while(1)
     {
         // Non-blocking one-second delay
-        vTaskDelay(1000 / portTICK_RATE_MS);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
         // Check if any enabled unit rates haven't been obtained for any reason.
         // Tomorrow's rates don't need to be checked here as they are checked hourly elsewhere.
         if
@@ -1519,7 +1520,7 @@ void fetcher_watchdog_task(void * pvParameters)
         {
             // Increment seconds counter and restart if limit is exceeded
             secondsCounter++;
-            ESP_LOGI(TAG_FW, "Watchdog increment %d", secondsCounter);
+            ESP_LOGI(TAG_FW, "Watchdog increment %lu", secondsCounter);
             ESP_LOGI(TAG_FW, "Got unit rate flags %d %d %d %d %d", got_gas_unit_rate, got_elec_unit_rate, got_gas_flex_unit_rate, got_elec_flex_unit_rate, got_elec_agile_unit_rate);
             if (secondsCounter > FETCHER_WDOG_LIMIT_IN_SECONDS)
             {
@@ -1550,7 +1551,7 @@ void app_main()
     // Set up GPIO
     
     gpio_config_t io_conf;
-    io_conf.intr_type = (gpio_int_type_t)GPIO_PIN_INTR_DISABLE;
+    io_conf.intr_type = (gpio_int_type_t)GPIO_INTR_DISABLE;
     io_conf.mode = GPIO_MODE_OUTPUT;
     io_conf.pin_bit_mask = ((uint64_t)1 << pin_segAL)
                          | ((uint64_t)1 << pin_segBL)
@@ -1623,6 +1624,6 @@ void app_main()
 
 	while(1)
     {
-        vTaskDelay(1000 / portTICK_RATE_MS);
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
 }
