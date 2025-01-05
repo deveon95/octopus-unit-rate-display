@@ -1,3 +1,7 @@
 build
 main/octopus_energy_root_cert.pem
 sdkconfig*
+PCB/production
+PCB/fp-info-cache
+PCB/fp-lib-table
+PCB/sym-lib-table
