@@ -1,7 +1,5 @@
 # Octopus Unit Rate Display for ESP32
 
-**IMPORTANT**: This uses the 'old' API which is pretty much broken now. I have a new version which uses the new API, which brings various benefits including the elimination of the problem of the API returning high prices when the real prices aren't available yet, and the ability to show tomorrow's price. The new version can also show the Agile and Flexible prices for comparison. I'll upload it when I get round to it... please open an issue if you're interested and I still haven't uploaded it yet.
-
 ![photo of the hardware](images/finished-hardware.jpg)
 
 This project gets JSON data from https://octopus.energy
